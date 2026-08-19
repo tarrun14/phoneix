@@ -192,6 +192,7 @@ def _summarise(claims, given_by_id):
     smallholder_potential = 0
     crops_lost = 0
     survival_met = 0
+    stranded_farms = []
 
     for c in claims:
         got = given_by_id.get(c["farm_id"], 0)
@@ -203,6 +204,10 @@ def _summarise(claims, given_by_id):
         # sharpest single count of who a policy abandons.
         if got <= 0:
             got_nothing += 1
+            stranded_farms.append({
+                "farm_id": c["farm_id"], 
+                "distance": c.get("distance_from_head_m")
+            })
 
         total_yield += realised
         potential_yield += c["expected_yield_kg"]
@@ -283,6 +288,7 @@ def _summarise(claims, given_by_id):
         # numbers are equal by construction — the Impact panel says so.
         "farms_below_survival":      crops_lost,
         "farms_with_nothing":        got_nothing,
+        "stranded_farms":            stranded_farms,
         "lost_farm_ids":             lost_farm_ids,
         "value_rupees":              int(round(value_rupees)),
         "potential_value_rupees":    int(round(potential_value_rupees)),

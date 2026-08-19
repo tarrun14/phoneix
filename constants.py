@@ -378,7 +378,7 @@ MARKET_PRICE_PER_KG = {
 # tank_liters is calibrated for REFERENCE_FARM_COUNT farms. Scale it
 # with n_farms (see impact.run_scenario) so 100-farm runs are not
 # artificially starved by a tank sized for a 4-farm demo.
-REFERENCE_FARM_COUNT = 4
+REFERENCE_FARM_COUNT = 10
 
 # DROUGHT moves BOTH levers on purpose: supply falls 700k -> 480k AND
 # ETo rises 5.0 -> 6.2 so demand climbs at the same time. That is what

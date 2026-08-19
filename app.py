@@ -781,6 +781,14 @@ def impact_rows(sc):
     smallholder_acres = SMALLHOLDER_AREA_M2 / M2_PER_ACRE
     has_small = aq["has_smallholders"]
 
+    def _stranded_fmt(cp_dict):
+        v = cp_dict["farms_with_nothing"]
+        sf = cp_dict.get("stranded_farms", [])
+        if not sf:
+            return f"{v:,.0f}"
+        details = ", ".join(f"{f['farm_id']} at {f['distance']}m" for f in sf)
+        return f"{v:,.0f}<br><span style='font-size:11px;font-weight:normal;line-height:1.2;display:inline-block;margin-top:2px;'>{details}</span>"
+
     return [
         {"label": "Total food produced",
          "note": "every farm's expected harvest, scaled down by how "
@@ -817,6 +825,7 @@ def impact_rows(sc):
                  "are the tail-enders the channel never reached",
          "cp": cp["farms_with_nothing"], "ym": ym["farms_with_nothing"],
          "aq": aq["farms_with_nothing"],
+         "cp_str": _stranded_fmt(cp),
          "fmt": lambda v: f"{v:,.0f}", "kind": "count", "better": "low"},
 
         {"label": "Smallholder harvest kept",
@@ -974,7 +983,7 @@ def render_impact(out):
             f"<div style='color:{GREY};font-size:{T_SMALL};"
             f"line-height:1.4;margin-top:2px;'>{r['note']}</div></td>"
             f"<td style='text-align:right;padding:{pad} 6px;color:{GREY};"
-            f"white-space:nowrap;{big}'>{r['fmt'](r['cp'])}</td>"
+            f"white-space:nowrap;{big}'>{r.get('cp_str') if 'cp_str' in r else r['fmt'](r['cp'])}</td>"
             f"<td style='text-align:right;padding:{pad} 6px;color:{GREY};"
             f"white-space:nowrap;{big}'>{r['fmt'](r['ym'])}</td>"
             f"<td style='text-align:right;padding:{pad} 10px;color:{INK};"
