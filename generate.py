@@ -13,8 +13,10 @@ we have no access to real district records. The maths that consumes this
 output (farm_agent.py, optimizer.py, impact.py) is real.
 """
 
+import csv
 import math
 import random
+from pathlib import Path
 
 from constants import KC, STAGES, TYPICAL_YIELD_KG_PER_M2, M2_PER_ACRE
 from sources import list_sources, get_source, DEFAULT_SOURCE
@@ -201,12 +203,25 @@ def generate_farms(n, seed=None, source_id=None):
 
 
 # ── The fixed demo set ───────────────────────────────────────────
-# Hand-written rather than generated, so the on-stage numbers are
-# identical in rehearsal and in judging. Yields follow the constants
-# table exactly; farm_agent computes everything else.
+# The farms themselves live in demo_farms.csv, NOT in this file.
 #
-# Spread across all four sources so an officer picking any command area
-# sees real farms. Sized to the declared command areas:
+# WHY A CSV
+# A farm record is a row: source, id, farmer, crop, stage, area, debt.
+# Seven columns, no nesting. Keeping it as a spreadsheet means anyone on
+# the team can add or edit a demo farm without touching Python, and a
+# diff shows one changed row instead of a changed source file.
+#
+# ⚠ ONLY THE INPUTS ARE IN THE CSV.
+# expected_yield_kg and is_smallholder are DERIVED in demo_farms() from
+# constants.py. Putting a yield in the CSV is exactly the drift that
+# broke the first fake_claims.py: a typed number and a computed number
+# disagreeing, with no way to tell which was right. If the yield rate in
+# constants.py changes, every demo farm follows automatically.
+#
+# The generator below is NOT data and stays in Python — you cannot put
+# weighted size bands and per-crop variance in a spreadsheet.
+#
+# Sized to the declared command areas:
 #     T01 Periya Eri            4 ha  ->   4 farms   THE ON-STAGE SET
 #     T02 Kanmoi Chinna Eri    11 ha  ->   7 farms
 #     C01 Kalingarayan Canal   72 ha  ->  12 farms
@@ -216,74 +231,86 @@ def generate_farms(n, seed=None, source_id=None):
 # Tank command areas are marginal and small holdings; canal command
 # areas carry larger farms. Under the official 2 ha smallholder line
 # that means the tanks are all smallholders and the canals are mixed —
-# which is what finally gives the Impact panel a real smallholder-vs-
-# large comparison instead of comparing smallholders to nobody.
+# which is what gives the Impact panel a real smallholder-versus-large
+# comparison instead of comparing smallholders to nobody.
 #
-# fairness_debt is seeded on several farms. If every farm is 0.0 the
-# fairness ledger renders blank on every card and the feature is
-# invisible in the demo.
-_DEMO_SPEC = [
-    # (source, id, farmer, crop, stage, area_m2, fairness_debt)
+# fairness_debt is seeded on several rows. If every farm were 0.0 the
+# fairness ledger would render blank on every card and the feature
+# would be invisible in the demo.
 
-    # ── T01 Periya Eri — the four farms we rehearse on ──
-    ("T01", "F001", "Murugan",     "tomato",    "mid",         10_117, 0.0),
-    ("T01", "F002", "Kavitha",     "onion",     "late",         8_000, 1.2),
-    ("T01", "F003", "Rajesh",      "ragi",      "development",  5_000, 0.0),
-    ("T01", "F004", "Lakshmi",     "paddy",     "mid",         12_000, 0.0),
+# Resolved against THIS file, not the working directory. `streamlit run
+# app.py` and `python main.py` can be launched from anywhere, and a
+# relative "demo_farms.csv" would only resolve for one of them.
+DEMO_FARMS_CSV = Path(__file__).with_name("demo_farms.csv")
 
-<<<<<<< Updated upstream
-    # ── T02 Kanmoi Chinna Eri — small tank, marginal holdings ──
-    ("T02", "F005", "Selvam",      "groundnut", "mid",         14_000, 0.0),
-    ("T02", "F006", "Bhavani",     "ragi",      "initial",      9_500, 0.8),
-    ("T02", "F007", "Manikandan",  "maize",     "mid",         18_000, 0.0),
-    ("T02", "F008", "Saroja",      "onion",     "development", 11_000, 1.5),
-    ("T02", "F009", "Velu",        "sorghum",   "mid",         16_500, 0.0),
-    ("T02", "F010", "Shanthi",     "bean",      "development", 12_000, 0.0),
-    ("T02", "F011", "Ganesan",     "paddy",     "initial",     19_000, 0.4),
-=======
 # ⚠ distance_from_head_m is NOT here. It is computed in demo_farms()
 # from the source's command area, so a channel position cannot drift
 # from the tank record it is derived from — the same reason
 # expected_yield_kg is not in the CSV either.
 DEMO_CSV_FIELDS = ["source_id", "farm_id", "farmer_name", "crop",
                    "stage", "area_m2", "fairness_debt"]
->>>>>>> Stashed changes
 
-    # ── C01 Kalingarayan Branch Canal — larger holdings ──
-    ("C01", "F012", "Perumal",     "sugarcane", "mid",         82_000, 0.0),
-    ("C01", "F013", "Anitha",      "paddy",     "mid",         64_000, 0.0),
-    ("C01", "F014", "Karthik",     "cotton",    "mid",         71_000, 0.0),
-    ("C01", "F015", "Vasanthi",    "paddy",     "development", 55_000, 0.9),
-    ("C01", "F016", "Subramani",   "sugarcane", "development", 90_000, 0.0),
-    ("C01", "F017", "Meena",       "maize",     "late",        38_000, 0.0),
-    ("C01", "F018", "Dhanapal",    "tomato",    "mid",         26_000, 0.6),
-    ("C01", "F019", "Kalaivani",   "groundnut", "mid",         31_000, 0.0),
-    ("C01", "F020", "Ravichandran","paddy",     "late",        58_000, 0.0),
-    ("C01", "F021", "Amudha",      "sunflower", "mid",         44_000, 1.1),
-    ("C01", "F022", "Nagarajan",   "cotton",    "development", 67_000, 0.0),
-    ("C01", "F023", "Sundari",     "ragi",      "mid",         14_000, 0.0),
 
-    # ── C02 Thottiyam Distributary — mixed ──
-    ("C02", "F024", "Elango",      "paddy",     "mid",         62_000, 0.0),
-    ("C02", "F025", "Poongodi",    "sugarcane", "mid",         74_000, 0.0),
-    ("C02", "F026", "Chandran",    "maize",     "mid",         41_000, 0.7),
-    ("C02", "F027", "Vijaya",      "onion",     "mid",         29_000, 0.0),
-    ("C02", "F028", "Arumugam",    "groundnut", "development", 36_000, 0.0),
-    ("C02", "F029", "Malathi",     "bean",      "mid",         22_000, 1.3),
-    ("C02", "F030", "Sekar",       "cotton",    "late",        48_000, 0.0),
-    ("C02", "F031", "Jothi",       "sorghum",   "development", 33_000, 0.0),
-    ("C02", "F032", "Kumaresan",   "tomato",    "development", 27_000, 0.0),
-]
+def load_demo_spec(path=None):
+    """Read the demo farms from CSV.
+
+    Validates as it reads. A malformed row should fail here with a line
+    number and a reason, not three modules downstream with a KeyError
+    that names a crop nobody typed.
+    """
+    path = Path(path) if path else DEMO_FARMS_CSV
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path.name} not found next to generate.py. It holds the 32 "
+            f"demo farms; without it there is no on-stage set.")
+
+    spec = []
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        missing = set(DEMO_CSV_FIELDS) - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                f"{path.name} is missing column(s): {sorted(missing)}")
+
+        for line, row in enumerate(reader, start=2):
+            crop = row["crop"].strip()
+            stage = row["stage"].strip()
+            if crop not in KC:
+                raise ValueError(
+                    f"{path.name} line {line}: unknown crop {crop!r}. "
+                    f"Known: {sorted(KC)}")
+            if stage not in STAGES:
+                raise ValueError(
+                    f"{path.name} line {line}: unknown stage {stage!r}. "
+                    f"Known: {STAGES}")
+            try:
+                area = int(row["area_m2"])
+                debt = float(row["fairness_debt"])
+            except ValueError as exc:
+                raise ValueError(
+                    f"{path.name} line {line}: {exc}") from exc
+            if area <= 0:
+                raise ValueError(
+                    f"{path.name} line {line}: area_m2 must be > 0")
+
+            spec.append({
+                "source_id": row["source_id"].strip(),
+                "farm_id": row["farm_id"].strip(),
+                "farmer_name": row["farmer_name"].strip(),
+                "crop": crop,
+                "stage": stage,
+                "area_m2": area,
+                "fairness_debt": debt,
+            })
+
+    ids = [r["farm_id"] for r in spec]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        raise ValueError(f"{path.name}: duplicate farm_id(s): {dupes}")
+    return spec
 
 
 def demo_farms(source_id=None):
-<<<<<<< Updated upstream
-    """The fixed demo farms. Pass a source_id for just that command area."""
-    # Farms are laid out along their own source's channel in the order
-    # they are listed above, spaced evenly and then nudged, so the
-    # head-to-tail sequence is stable and readable while the metres
-    # themselves are not a suspiciously round ruler.
-=======
     """The fixed demo farms. Pass a source_id for just that command area.
 
     Inputs come from demo_farms.csv; expected_yield_kg, is_smallholder
@@ -296,10 +323,9 @@ def demo_farms(source_id=None):
     themselves are not a suspiciously round ruler."""
     spec = load_demo_spec()
 
->>>>>>> Stashed changes
     per_source = {}
-    for row in _DEMO_SPEC:
-        per_source.setdefault(row[0], []).append(row[1])
+    for r in spec:
+        per_source.setdefault(r["source_id"], []).append(r["farm_id"])
 
     distance = {}
     for sid, fids in per_source.items():
@@ -312,29 +338,21 @@ def demo_farms(source_id=None):
 
     out = [
         {
-            "farm_id": fid,
-            "source_id": src,
-            "farmer_name": name,
-            "crop": crop,
-            "stage": stage,
-            "area_m2": area,
+            "farm_id": r["farm_id"],
+            "source_id": r["source_id"],
+            "farmer_name": r["farmer_name"],
+            "crop": r["crop"],
+            "stage": r["stage"],
+            "area_m2": r["area_m2"],
             "soil_moisture_pct": 35.0,
-<<<<<<< Updated upstream
-            "expected_yield_kg": round(area * TYPICAL_YIELD_KG_PER_M2[crop]),
-            "is_smallholder": area < SMALLHOLDER_AREA_M2,
-            "fairness_debt": debt,
-            # Metres from the sluice. Read by impact.head_to_tail_split.
-            "distance_from_head_m": distance[fid],
-=======
             "expected_yield_kg": round(
                 r["area_m2"] * TYPICAL_YIELD_KG_PER_M2[r["crop"]]),
             "is_smallholder": r["area_m2"] < SMALLHOLDER_AREA_M2,
             "fairness_debt": r["fairness_debt"],
             # Metres from the sluice. Read by head_to_tail_split().
             "distance_from_head_m": distance[r["farm_id"]],
->>>>>>> Stashed changes
         }
-        for src, fid, name, crop, stage, area, debt in _DEMO_SPEC
+        for r in spec
     ]
     if source_id is not None:
         out = [f for f in out if f["source_id"] == source_id]

@@ -1,26 +1,29 @@
 """
 verify.py — AquaFair
-Run this on your own machine to check the whole project works.
+One command to check the whole project, engine and dashboard.
 
-    python3 verify.py
-
-Checks, in order:
-  1. every module imports
-  2. constants tables are complete and consistent
-  3. the source registry is sane
-  4. every farm has every field
-  5. fake_claims still matches the engine
-  6. every source x scenario x policy allocates without error
-  7. the invariants that must never break
-  8. edge cases: zero water, no demand, one farm, 200 farms
+    python3 verify.py           engine + a fast dashboard pass  (~1 min)
+    python3 verify.py --full    every source x scenario x policy (~5 min)
+    python3 verify.py --engine  engine only, no Streamlit        (~5 sec)
 
 Exit code 0 = safe to demo. 1 = something is wrong, and it says what.
-This does NOT check the dashboard renders — for that, run streamlit and
-click through Normal / Drought / Rain on each source.
+
+WHY THE DASHBOARD SECTION EXISTS
+Booting Streamlit and getting HTTP 200 does NOT prove a page renders.
+Streamlit catches script errors and shows them in the browser while the
+server still answers 200. AppTest actually executes the script, so an
+exception surfaces here instead of in front of a judge.
+
+And setting session_state directly bypasses the widget layer, so it
+misses a whole class of Streamlit error. Section 11 clicks the real
+controls for that reason.
 """
 
 import sys
 import traceback
+
+FULL = "--full" in sys.argv
+ENGINE_ONLY = "--engine" in sys.argv
 
 FAILS = []
 CHECKS = 0
@@ -41,6 +44,7 @@ def check(label, fn):
         traceback.print_exc(limit=2)
 
 
+# ═════════════════════════════════════════════════════════════════
 print("\n=== 1. imports ===")
 
 MODULES = ["constants", "sources", "generate", "farm_agent",
@@ -60,8 +64,6 @@ from farm_agent import build_claims                        # noqa: E402
 from impact import run_scenario                            # noqa: E402
 
 
-<<<<<<< Updated upstream
-=======
 # ═════════════════════════════════════════════════════════════════
 print("\n=== 1b. data files ===")
 # Two data files now live outside Python: the tank registry and the demo
@@ -151,7 +153,6 @@ check("demo_farms.csv loads and validates", _farms_file)
 
 
 # ═════════════════════════════════════════════════════════════════
->>>>>>> Stashed changes
 print("\n=== 2. constants ===")
 
 
@@ -190,8 +191,7 @@ check("the maize demo line still holds", _demo_line)
 
 
 def _cycle_coupling():
-    farms = demo_farms("T01")
-    claims = build_claims(farms, C.WEATHER_STATES["drought"])
+    claims = build_claims(demo_farms("T01"), C.WEATHER_STATES["drought"])
     survival = sum(c["survival_minimum_L"] for c in claims)
     tank = S.deliverable_water_L("T01")
     assert survival <= tank, (
@@ -201,9 +201,21 @@ def _cycle_coupling():
     return f"survival {survival:,.0f} L fits in {tank:,.0f} L deliverable"
 
 
-check("CYCLE_DAYS and tank size are compatible", _cycle_coupling)
+check("CYCLE_DAYS and source volume are compatible", _cycle_coupling)
 
 
+def _defaults():
+    assert C.DEFAULT_POLICY == "equity", \
+        f"DEFAULT_POLICY is {C.DEFAULT_POLICY!r} — the dashboard must not " \
+        f"open on the baseline it argues against"
+    assert C.DEFAULT_WEATHER in C.WEATHER_STATES
+    return f"policy {C.DEFAULT_POLICY}, weather {C.DEFAULT_WEATHER}"
+
+
+check("safe defaults", _defaults)
+
+
+# ═════════════════════════════════════════════════════════════════
 print("\n=== 3. sources ===")
 
 
@@ -222,18 +234,18 @@ check("registry values are sane", _registry)
 
 
 def _conveyance():
-    lines = []
+    parts = []
     for sid in S.list_sources():
-        r = S.get_source(sid)
         lost = S.conveyance_loss_L(sid)
-        assert lost > 0, f"{sid} loses nothing in transit — efficiency is 1.0?"
-        lines.append(f"{sid} loses {lost:,.0f} L")
-    return "; ".join(lines)
+        assert lost > 0, f"{sid} loses nothing in transit — efficiency 1.0?"
+        parts.append(f"{sid} {lost:,.0f} L")
+    return "lost in transit: " + ", ".join(parts)
 
 
 check("conveyance loss is modelled", _conveyance)
 
 
+# ═════════════════════════════════════════════════════════════════
 print("\n=== 4. farms ===")
 
 FARM_FIELDS = ["farm_id", "source_id", "farmer_name", "crop", "stage",
@@ -258,8 +270,8 @@ def _farms_per_source():
     parts = []
     for sid in S.list_sources():
         n = len(demo_farms(sid))
-        assert n > 0, f"{sid} has no farms — the dashboard will show an " \
-                      f"empty command area"
+        assert n > 0, f"{sid} has no farms — the dashboard shows an empty " \
+                      f"command area"
         parts.append(f"{sid}:{n}")
     return " ".join(parts)
 
@@ -282,16 +294,27 @@ def _isolation():
 check("command areas are isolated", _isolation)
 
 
+def _claims_carry_source():
+    claims = build_claims(demo_farms(), C.WEATHER_STATES["normal"])
+    missing = [c["farm_id"] for c in claims if not c.get("source_id")]
+    assert not missing, f"claims without a source_id: {missing[:5]}"
+    return "farm_agent carries source_id into every claim"
+
+
+check("claims keep their command area", _claims_carry_source)
+
+
 def _debt_seeded():
     n = sum(1 for f in demo_farms() if f["fairness_debt"] > 0)
-    assert n > 0, "no farm carries a fairness debt — the ledger will " \
-                  "render blank on every card"
+    assert n > 0, "no farm carries a fairness debt — the ledger renders " \
+                  "blank on every card"
     return f"{n} farms carry a debt"
 
 
 check("fairness ledger has something to show", _debt_seeded)
 
 
+# ═════════════════════════════════════════════════════════════════
 print("\n=== 5. fake_claims drift ===")
 
 
@@ -304,17 +327,19 @@ def _drift():
             for c in build_claims(demo_farms(), C.WEATHER_STATES["normal"])}
     stored = {c["farm_id"]: c for c in FAKE_CLAIMS}
     assert set(live) == set(stored), \
-        f"farm sets differ: only live {sorted(set(live)-set(stored))}, " \
-        f"only stored {sorted(set(stored)-set(live))}"
+        f"farm sets differ: only live {sorted(set(live)-set(stored))[:5]}, " \
+        f"only stored {sorted(set(stored)-set(live))[:5]}"
     drift = [f for f in live if live[f] != stored[f]]
-    assert not drift, f"values drifted for {drift} — run python3 fake_claims.py"
+    assert not drift, \
+        f"values drifted for {drift[:5]} — run python3 fake_claims.py"
     return f"{len(stored)} claims match the engine"
 
 
 check("fake_claims matches the engine", _drift)
 
 
-print("\n=== 6 & 7. allocation and invariants ===")
+# ═════════════════════════════════════════════════════════════════
+print("\n=== 6. allocation and invariants ===")
 
 SCENARIOS = ["normal", "drought", "rain"]
 MODES = ["equity", "yield_max", "emergency"]
@@ -336,7 +361,7 @@ def _invariants(out, tag):
     assert handed <= tank + 1, \
         f"{tag}: allocated {handed:,.0f} L of {tank:,.0f} L available"
     assert set(claims) == set(alloc), \
-        f"{tag}: {sorted(set(claims) ^ set(alloc))} has no allocation row"
+        f"{tag}: {sorted(set(claims) ^ set(alloc))[:5]} has no allocation row"
 
     for fid, a in alloc.items():
         c = claims[fid]
@@ -352,8 +377,7 @@ for _sid in S.list_sources():
     for _scen in SCENARIOS:
         def _combo(sid=_sid, scen=_scen):
             for mode in MODES:
-                out = _run(sid, scen, mode)
-                _invariants(out, f"{sid}/{scen}/{mode}")
+                _invariants(_run(sid, scen, mode), f"{sid}/{scen}/{mode}")
             eq = _run(sid, scen, "equity")
             if not eq["coordination"]["supply_infeasible"]:
                 lost = eq["scorecard"]["equity"]["crops_lost"]
@@ -362,23 +386,12 @@ for _sid in S.list_sources():
                     f"feasible supply — the survival floor is not holding")
             d = sum(c["water_required_L"] for c in eq["claims"])
             gap = (1 - eq["tank_L"] / d) * 100 if d else 0
-            return f"{gap:+.0f}% gap, {eq['coordination']['rounds_used']} round(s)"
+            return (f"{gap:+.0f}% gap, "
+                    f"{eq['coordination']['rounds_used']} round(s)")
 
         check(f"{_sid} / {_scen} (all 3 policies)", _combo)
 
 
-<<<<<<< Updated upstream
-def _money_slide():
-    h = _run("T01", "drought", "equity")["scorecard"]["headline"]
-    assert h["aquafair_crops_lost"] < h["yieldmax_crops_lost"], (
-        f"AquaFair lost {h['aquafair_crops_lost']}, yield_max lost "
-        f"{h['yieldmax_crops_lost']} — no contrast to demo")
-    return (f"yield_max loses {h['yieldmax_crops_lost']}, "
-            f"AquaFair loses {h['aquafair_crops_lost']}")
-
-
-check("T01 drought money slide points the right way", _money_slide)
-=======
 def _every_source_populated():
     """Load 100 must never leave a command area empty.
 
@@ -466,7 +479,6 @@ def _compensation_costed():
 
 
 check("compensation tracks crops lost", _compensation_costed)
->>>>>>> Stashed changes
 
 
 def _crops_lost_everywhere():
@@ -475,14 +487,85 @@ def _crops_lost_everywhere():
         assert h["aquafair_crops_lost"] == 0, \
             f"{sid}: AquaFair lost {h['aquafair_crops_lost']} crop(s)"
         assert h["yieldmax_crops_lost"] > 0, \
-            f"{sid}: yield_max lost nothing — no contrast"
+            f"{sid}: yield_max lost nothing — no contrast to demo"
     return "AquaFair loses 0 crops on every source; yield_max does not"
 
 
-check("the claim that holds on all four sources", _crops_lost_everywhere)
+check("THE claim that holds on all four sources", _crops_lost_everywhere)
 
 
-print("\n=== 8. edge cases ===")
+def _money_slide():
+    h = _run("T01", "drought", "equity")["scorecard"]["headline"]
+    assert h["aquafair_food_kg"] > h["yieldmax_food_kg"], (
+        f"T01 money slide inverted: AquaFair {h['aquafair_food_kg']:,} kg "
+        f"vs yield_max {h['yieldmax_food_kg']:,} kg")
+    return (f"+{h['food_gain_kg']:,} kg, "
+            f"{h['yieldmax_crops_lost']} lost vs {h['aquafair_crops_lost']}")
+
+
+check("T01 drought money slide points the right way", _money_slide)
+
+
+# ═════════════════════════════════════════════════════════════════
+print("\n=== 7. round records (the agent trace reads these) ===")
+
+ROUND_FIELDS = {"round", "urgency", "handed_out_L", "given",
+                "contested", "escalated", "outcome", "note"}
+CONTESTED_FIELDS = {"farm_id", "crop", "allocated_L", "survival_L",
+                    "required_L", "yield_loss_pct", "below_survival"}
+
+
+def _rounds_present():
+    out = _run("T01", "drought", "equity")
+    assert "rounds" in out["coordination"], \
+        "coordination has no 'rounds' key — agent trace panels 2 and 3 " \
+        "will be empty"
+    assert out["coordination"]["rounds"], "rounds list is empty"
+    return f"{len(out['coordination']['rounds'])} record(s) on T01 drought"
+
+
+check("coordinator records rounds", _rounds_present)
+
+
+def _round_shape():
+    seen = set()
+    for sid in S.list_sources():
+        for scen in SCENARIOS:
+            for mode in MODES:
+                out = _run(sid, scen, mode)
+                for r in out["coordination"]["rounds"]:
+                    assert set(r) == ROUND_FIELDS, \
+                        f"{sid}/{scen}/{mode} round fields: " \
+                        f"{set(r) ^ ROUND_FIELDS}"
+                    assert r["outcome"], "a round has an empty outcome"
+                    assert r["note"], "a round has an empty note"
+                    seen.add(r["outcome"])
+                    for row in r["contested"]:
+                        assert set(row) == CONTESTED_FIELDS, \
+                            f"contested row fields: " \
+                            f"{set(row) ^ CONTESTED_FIELDS}"
+    return f"outcomes reached: {', '.join(sorted(seen))}"
+
+
+check("every round record is complete", _round_shape)
+
+
+def _infeasible_outcome():
+    out = run_scenario(demo_farms("T01"),
+                       {"ETo": 6.2, "rainfall_mm": 0, "tank_liters": 50_000},
+                       scale_tank=False)
+    assert out["coordination"]["supply_infeasible"]
+    assert out["coordination"]["rounds"][0]["outcome"] == "infeasible"
+    assert out["coordination"]["rounds_used"] == 1, \
+        "infeasible supply should stop after one round, not spin"
+    return "supply below the floor stops after one round and says so"
+
+
+check("infeasible supply short-circuits", _infeasible_outcome)
+
+
+# ═════════════════════════════════════════════════════════════════
+print("\n=== 8. engine edge cases ===")
 
 
 def _zero_water():
@@ -520,7 +603,8 @@ check("single farm", _one_farm)
 def _no_farms():
     out = run_scenario([], dict(C.WEATHER_STATES["normal"]), scale_tank=False)
     assert out["allocation"] == {}
-    return "empty list returns empty allocation"
+    assert out["coordination"]["rounds"] == []
+    return "empty list returns empty allocation and empty rounds"
 
 
 check("no farms", _no_farms)
@@ -545,18 +629,242 @@ def _big():
 check("200 farms", _big)
 
 
-print("\n" + "=" * 70)
-if FAILS:
-    print(f"  {len(FAILS)} FAILURE(S) out of {CHECKS} checks")
+# ═════════════════════════════════════════════════════════════════
+def _finish():
+    print("\n" + "=" * 70)
+    if FAILS:
+        print(f"  {len(FAILS)} FAILURE(S) out of {CHECKS} checks")
+        print("=" * 70)
+        for f in FAILS:
+            print(f"  x {f}")
+        print()
+        sys.exit(1)
+    print(f"  ALL {CHECKS} CHECKS PASSED")
     print("=" * 70)
-    for f in FAILS:
-        print(f"  x {f}")
     print()
-    sys.exit(1)
+    sys.exit(0)
 
-print(f"  ALL {CHECKS} CHECKS PASSED")
-print("=" * 70)
-print("  Engine is sound. Still click through the dashboard before you")
-print("  demo — this does not render the UI.")
-print()
-sys.exit(0)
+
+if ENGINE_ONLY:
+    print("\n  (dashboard not tested — drop --engine to include it)")
+    _finish()
+
+
+print("\n=== 9. dashboard: does the page render? ===")
+
+# Streamlit logs "missing ScriptRunContext!" for every AppTest run. It
+# is expected in bare mode — Streamlit's own message says so — but it
+# fires several times per render and buries the results.
+#
+# Setting the log level alone is not enough: Streamlit reconfigures its
+# loggers from config when the runtime initialises, which resets
+# whatever we set beforehand. A FILTER survives that, because filters
+# are attached to the logger object and re-levelling does not clear
+# them. Belt and braces: the env var is read by Streamlit's config at
+# import, the filter catches anything that slips past it.
+import logging                                            # noqa: E402
+import os                                                 # noqa: E402
+
+os.environ.setdefault("STREAMLIT_LOGGER_LEVEL", "error")
+os.environ.setdefault("STREAMLIT_GLOBAL_DEVELOPMENT_MODE", "false")
+
+
+class _DropBareModeNoise(logging.Filter):
+    """Silence the one message, keep every other Streamlit warning.
+
+    Muting the whole logger would also hide a real deprecation or
+    render warning, which is exactly the kind of thing this script
+    exists to surface."""
+
+    def filter(self, record):
+        return "missing ScriptRunContext" not in record.getMessage()
+
+
+for _name in ("streamlit",
+              "streamlit.runtime.scriptrunner_utils.script_run_context",
+              "streamlit.runtime.scriptrunner.script_run_context"):
+    _lg = logging.getLogger(_name)
+    _lg.addFilter(_DropBareModeNoise())
+
+try:
+    from streamlit.testing.v1 import AppTest
+except ImportError:
+    AppTest = None
+    print("  SKIP  streamlit.testing unavailable — `pip install streamlit` "
+          "to include the dashboard checks")
+
+if AppTest is not None:
+    # Streamlit attaches its own handler when the runtime initialises,
+    # after the import above. A filter on the logger is not consulted
+    # for records that reach a handler by propagation, so put one on
+    # every handler Streamlit installed as well.
+    for _h in logging.getLogger("streamlit").handlers + logging.root.handlers:
+        _h.addFilter(_DropBareModeNoise())
+
+    def _render(setup=None, timeout=90):
+        at = AppTest.from_file("app.py", default_timeout=timeout)
+        at.run()
+        if setup:
+            setup(at)
+            at.run()
+        if at.exception:
+            raise AssertionError(str(at.exception[0].value))
+        return at
+
+    def _weather(at, sid, scen):
+        at.session_state["source_id"] = sid
+        at.session_state["w_ETo"] = float(C.WEATHER_STATES[scen]["ETo"])
+        at.session_state["w_rainfall_mm"] = float(
+            C.WEATHER_STATES[scen]["rainfall_mm"])
+        at.session_state["w_tank_liters"] = float(S.deliverable_water_L(sid))
+        at.session_state["scale_tank"] = False
+
+    check("opens clean on the default screen", lambda: _render() and None)
+
+    _combos = ([(s, sc, m) for s in S.list_sources()
+                for sc in SCENARIOS for m in MODES] if FULL else
+               [(s, "drought", "equity") for s in S.list_sources()]
+               + [("T01", sc, "equity") for sc in SCENARIOS if sc != "drought"]
+               + [("T01", "drought", m) for m in MODES if m != "equity"])
+
+    for _sid, _scen, _mode in _combos:
+        def _one(sid=_sid, scen=_scen, mode=_mode):
+            def setup(at):
+                _weather(at, sid, scen)
+                at.session_state["mode"] = mode
+            _render(setup)
+            return None
+        check(f"{_sid} / {_scen} / {_mode}", _one)
+
+    if not FULL:
+        print(f"        (--full runs all {len(S.list_sources()) * 9} "
+              f"combinations)")
+
+    def _hundred():
+        def setup(at):
+            at.session_state["farms"] = generate_farms(100, seed=42)
+        _render(setup, timeout=180)
+        return "100 farms render"
+
+    check("100 farms", _hundred)
+
+    # ─────────────────────────────────────────────────────────────
+    print("\n=== 10. dashboard: edge cases ===")
+
+    for _tag, _setup in [
+        ("zero water", {"w_tank_liters": 0.0}),
+        ("zero demand", {"w_ETo": 0.0, "w_rainfall_mm": 50.0}),
+        ("extreme drought", {"w_ETo": 15.0, "w_tank_liters": 1000.0}),
+        ("supply infeasible", {"w_tank_liters": 50_000.0,
+                               "scale_tank": False}),
+        ("no farms at all", {"farms": []}),
+    ]:
+        def _edge(setup=_setup):
+            def apply(at):
+                for k, v in setup.items():
+                    at.session_state[k] = v
+            _render(apply)
+            return None
+        check(_tag, _edge)
+
+    def _empty_source():
+        """A command area with no farms must invite, not crash."""
+        def setup(at):
+            at.session_state["farms"] = demo_farms("T01")
+            at.session_state["source_id"] = "C01"
+        _render(setup)
+        return "empty command area shows a message"
+
+    check("source with no farms", _empty_source)
+
+    # ─────────────────────────────────────────────────────────────
+    print("\n=== 11. dashboard: clicking the real controls ===")
+    # Setting session_state bypasses the widget layer, so it cannot catch
+    # StreamlitAPIException from writing to a widget-bound key. These
+    # press the actual buttons.
+
+    def _click(at, label):
+        for b in at.button:
+            if b.label == label:
+                b.click()
+                return True
+        return False
+
+    def _sequence(labels, timeout=120, before=None):
+        at = AppTest.from_file("app.py", default_timeout=timeout)
+        at.run()
+        if before:
+            before(at)
+            at.run()
+        for label in labels:
+            assert _click(at, label), f"no button labelled {label!r}"
+            at.run()
+            assert not at.exception, \
+                f"after {label!r}: {at.exception[0].value}"
+        return at
+
+    for _labels, _tag in [
+        (["Normal"], "press Normal"),
+        (["Drought"], "press Drought"),
+        (["Heavy rain"], "press Heavy rain"),
+        (["Normal", "Drought", "Heavy rain", "Normal"], "rapid switching"),
+        (["Demo set"], "press Demo set"),
+    ]:
+        check(_tag, lambda labels=_labels: _sequence(labels) and None)
+
+    def _preset_lands():
+        at = AppTest.from_file("app.py", default_timeout=90)
+        at.run()
+        _click(at, "Normal")
+        at.run()
+        before = at.session_state["w_ETo"]
+        _click(at, "Drought")
+        at.run()
+        after = at.session_state["w_ETo"]
+        want = C.WEATHER_STATES["drought"]["ETo"]
+        assert after == want, \
+            f"preset did not land: w_ETo {before} -> {after}, expected {want}"
+        return f"ETo {before} -> {after}"
+
+    check("preset actually changes the reading", _preset_lands)
+
+    def _preset_keeps_source_water():
+        """A preset must NOT overwrite the command area's real volume."""
+        at = AppTest.from_file("app.py", default_timeout=90)
+        at.run()
+        before = at.session_state["w_tank_liters"]
+        _click(at, "Drought")
+        at.run()
+        after = at.session_state["w_tank_liters"]
+        assert before == after, (
+            f"pressing a preset changed the water from {before:,.0f} L to "
+            f"{after:,.0f} L — presets set weather only, because the volume "
+            f"belongs to the selected command area")
+        return f"{after:,.0f} L unchanged"
+
+    check("presets leave the source volume alone", _preset_keeps_source_water)
+
+    check("agent trace opens",
+          lambda: _sequence(["How the four agents worked"]) and None)
+
+    check("agent trace after switching preset",
+          lambda: _sequence(["Drought",
+                             "How the four agents worked"]) and None)
+
+    def _trace_100():
+        def before(at):
+            at.session_state["farms"] = generate_farms(100, seed=42)
+        _sequence(["How the four agents worked"], timeout=240, before=before)
+        return "trace renders with 100 farms"
+
+    check("agent trace with 100 farms", _trace_100)
+
+    check("Load 100 button",
+          lambda: _sequence(["Load 100"], timeout=200) and None)
+
+
+if not FULL and AppTest is not None:
+    print("\n  Tip: run `python3 verify.py --full` before the demo for every")
+    print("  source x scenario x policy combination.")
+
+_finish()

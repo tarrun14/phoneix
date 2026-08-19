@@ -38,7 +38,9 @@ from datetime import datetime
 import streamlit as st
 
 from constants import (M2_PER_ACRE, WEATHER_STATES, KC, STAGES,
-                       DEFAULT_WEATHER, CYCLE_DAYS, EFFECTIVE_RAIN_FRACTION)
+                       COMPENSATION_PER_ACRE_RUPEES, DEFAULT_WEATHER,
+                       CYCLE_DAYS, EFFECTIVE_RAIN_FRACTION,
+                       MARKET_PRICE_PER_KG)
 from coordinator import (CONTEST_YIELD_LOSS_PCT, ESCALATION_FACTOR,
                          MAX_ROUNDS)
 from generate import (demo_farms, generate_farms, farms_for_source,
@@ -81,7 +83,7 @@ MODES = {
 # floor, surplus) so the two-pass structure stays visible inside the
 # colour: the darker half is the floor, the lighter half is surplus.
 FULL_SHARE_PCT  = 0.95    # at or above this, the farm got what it asked
-PART_SHARE_PCT  = 0.60    # below this it is badly short
+
 BAR_GREEN = ("#4A6B48", "#8FA98D")
 BAR_AMBER = ("#B06E22", "#E0AE74")
 BAR_RED   = ("#963A2A", "#C9836F")
@@ -107,6 +109,25 @@ TINT    = "#F1EDE6"   # the one neutral fill
 OK      = BAR_GREEN[0]    # outcome green, and nothing else
 WARN    = BAR_AMBER[0]    # outcome amber, and nothing else
 BAD     = BAR_RED[0]      # outcome red, and nothing else
+
+# The three states a farm can be in, and the only place their words and
+# colours are written down. The badge, the bar and the card's left
+# stripe all read from farm_status() below, so a green badge over a red
+# bar is not something this file can express any more.
+#
+# The amber/red boundary is the crop's own survival minimum, not a round
+# percentage: 53% short is a bad week for groundnut and a dead crop for
+# paddy, and the floor already encodes which.
+STATUS_FULL  = ("FULL SHARE",     OK,   BAR_GREEN)
+STATUS_ABOVE = ("ABOVE SURVIVAL", WARN, BAR_AMBER)
+STATUS_BELOW = ("BELOW SURVIVAL", BAD,  BAR_RED)
+
+STATUS_HELP = ("Above survival means the crop lives but yields less. "
+               "Below survival means total crop failure and every litre "
+               "already spent on it is wasted.")
+CONTEST_HELP = ("This farm pushed back during negotiation and the "
+                "coordinator raised its priority. It can still end the "
+                "round above its survival minimum.")
 
 # Ky threshold, technical band, plain words for the card, colour.
 # The card shows the plain words. "Ky 1.35 Critical" is true and
@@ -170,18 +191,27 @@ def compute(farms, weather, mode, scale_tank=True):
 # Small helpers
 # ══════════════════════════════════════════════════════════════════
 
-def bar_colours(a):
-    """(floor colour, surplus colour, plain words) for one farm's bar.
+def farm_status(claim, a):
+    """(label, colour, (bar dark, bar light)) for one farm.
 
-    A contested farm is red whatever its percentage: the coordinator
-    escalated it because the crop is taking real damage, and a bar that
-    reads "fine" under a farm that spent three rounds fighting for water
-    would be the dashboard lying quietly."""
-    if a["contested"] or a["satisfaction"] < PART_SHARE_PCT:
-        return BAR_RED + ("badly short",)
-    if a["satisfaction"] < FULL_SHARE_PCT:
-        return BAR_AMBER + ("partly short",)
-    return BAR_GREEN + ("full share",)
+    The single source of truth for how a farm is doing. It used to be
+    two: the bar asked "what fraction did it get" and the badge asked
+    "did it clear its floor", so groundnut at 53% short drew a red bar
+    under a green SECURE badge and the card argued with itself.
+
+    Survival is tested FIRST, though it is the last state in the list.
+    A farm under its floor is failing whatever its percentage says, and
+    checking it first means no arrangement of the numbers can produce a
+    green badge over a dead crop.
+
+    Contest is deliberately NOT a state here. A farm that contested in
+    round 1 and was brought above its floor by round 3 is not failing —
+    the negotiation worked. It carries its own tag beside the badge."""
+    if a["total_L"] < claim["survival_minimum_L"]:
+        return STATUS_BELOW
+    if a["satisfaction"] >= FULL_SHARE_PCT:
+        return STATUS_FULL
+    return STATUS_ABOVE
 
 
 def ky_band(ky):
@@ -572,17 +602,32 @@ def render_farm_cards(claims, allocation, limit=12):
         gap_pct = max(0, 100 - floor_pct - surp_pct)
 
         band, plain_band, _band_colour = ky_band(claim["ky"])
-        floor_colour, surplus_colour, _outcome = bar_colours(a)
-        lost = a["total_L"] < claim["survival_minimum_L"]
+        # One call, three consumers: the pill, the bar and the stripe.
+        status, status_colour, (floor_colour, surplus_colour) = \
+            farm_status(claim, a)
 
-        # Filled pills, in the outcome colours only. A word set in a
-        # colour is easy to slide past; a pill is not.
-        if lost:
-            status, status_colour = "Crop lost", BAD
-        elif a["contested"]:
-            status, status_colour = "Contested", BAD
-        else:
-            status, status_colour = "Secure", OK
+        # Contest is a separate, quieter tag: it says what happened
+        # during the negotiation, not how the farm ended up. Outlined
+        # rather than filled so it cannot be mistaken for the state.
+        contest_tag = (
+            f"<span title='{CONTEST_HELP}' style='font-size:{T_SMALL};"
+            f"font-weight:600;letter-spacing:0.06em;text-transform:uppercase;"
+            f"color:{GREY};border:1px solid {LINE};padding:2px 9px;"
+            f"border-radius:999px;white-space:nowrap;'>Contested</span>"
+            if a["contested"] else "")
+
+        # One line, no indentation: an indented HTML block inside
+        # st.markdown is a code block, and that is exactly how it
+        # rendered on the cards where contest_tag was empty.
+        status_pill = (
+            f"<span title='{STATUS_HELP}' style='font-size:{T_SMALL};"
+            f"font-weight:700;letter-spacing:0.07em;text-transform:uppercase;"
+            f"color:{PAPER};background:{status_colour};padding:3px 11px;"
+            f"border-radius:999px;white-space:nowrap;cursor:help;'>"
+            f"{status}</span>")
+        status_cluster = (
+            f"<div style='display:flex;align-items:center;gap:7px;"
+            f"flex-shrink:0;'>{contest_tag}{status_pill}</div>")
 
         # The sensitivity reads grey with everything else on this line.
         # It is a property of the crop, not an outcome, and it was
@@ -606,10 +651,7 @@ def render_farm_cards(claims, allocation, limit=12):
     <div style="font-size:{T_CARD};font-weight:600;color:{INK};
                 line-height:1.3;">
       {claim['crop'].capitalize()} &middot; {growth_stage(claim)}</div>
-    <div style="font-size:{T_SMALL};font-weight:700;letter-spacing:0.07em;
-                text-transform:uppercase;color:{PAPER};
-                background:{status_colour};padding:3px 11px;
-                border-radius:999px;white-space:nowrap;">{status}</div>
+    {status_cluster}
   </div>
 
   <div style="color:{GREY};font-size:{T_SMALL};margin:5px 0 13px 0;">
@@ -665,109 +707,483 @@ def render_activity_log(log):
         unsafe_allow_html=True)
 
 
-def render_impact(scorecard):
-    h = scorecard["headline"]
-    has_small = h.get("has_smallholders", True)
+# ─────────────────────────────────────────────────────────────────
+# THE IMPACT PANEL
+#
+# Five columns: what current practice does, what pure yield-maximisation
+# does, what AquaFair does, and the gap between AquaFair and the status
+# quo. The gap column is the point of the panel, so it is never hidden
+# and never spun: it goes green only when AquaFair is actually ahead on
+# that row, and grey — not red — when it is behind, because a row
+# AquaFair loses is information, not an alarm.
+#
+# Every figure is read out of the scorecard impact.py just built from
+# this allocation. Nothing here is stored between reruns.
+# ─────────────────────────────────────────────────────────────────
 
-    # The two columns were set at equal weight, which reads as a
-    # neutral comparison. It is not one — the right-hand column is the
-    # claim being made, so it carries a tint and heavier figures, and
-    # the crops-lost row is set large because that row is the argument.
-    small_row = (
-        f"""  <tr>
-    <td style="padding:9px 6px;color:{GREY};">Smallholder harvest kept</td>
-    <td style="text-align:right;padding:9px 6px;color:{GREY};">
-        {h['yieldmax_smallholder_kept_pct']:.0f}%</td>
-    <td style="text-align:right;padding:9px 10px;font-weight:700;
-               color:{INK};background:{TINT};">
-        {h['aquafair_smallholder_kept_pct']:.0f}%</td>
-  </tr>""" if has_small else
-        f"""  <tr>
-    <td style="padding:9px 6px;color:{GREY};">Smallholder harvest kept</td>
-    <td colspan="2" style="text-align:right;padding:9px 10px;color:{GREY};
-        font-size:{T_SMALL};">no holdings under 2 ha in this command area</td>
-  </tr>""")
+def _rupees(v):
+    return f"\u20b9{v:,.0f}"
 
-    st.markdown(f"""
-<table style="width:100%;border-collapse:collapse;font-size:{T_BODY};">
-  <tr style="border-bottom:2px solid {INK};">
-    <th style="text-align:left;padding:8px 6px;"></th>
-    <th style="text-align:right;padding:8px 6px;color:{GREY};
-               font-size:{T_SMALL};font-weight:600;">Maximise yield</th>
-    <th style="text-align:right;padding:8px 10px;color:{INK};
-               font-size:{T_SMALL};font-weight:700;background:{TINT};">
-        AquaFair</th>
-  </tr>
-  <tr style="border-bottom:1px solid {LINE};">
-    <td style="padding:9px 6px;color:{GREY};">Total food produced</td>
-    <td style="text-align:right;padding:9px 6px;color:{GREY};">
-        {h['yieldmax_food_kg']:,} kg</td>
-    <td style="text-align:right;padding:9px 10px;font-weight:700;
-               color:{INK};background:{TINT};">
-        {h['aquafair_food_kg']:,} kg</td>
-  </tr>
-  <tr style="border-bottom:1px solid {LINE};">
-    <td style="padding:9px 6px;color:{GREY};">Staple food produced</td>
-    <td style="text-align:right;padding:9px 6px;color:{GREY};">
-        {h['yieldmax_staple_kg']:,} kg</td>
-    <td style="text-align:right;padding:9px 10px;font-weight:700;
-               color:{INK};background:{TINT};">
-        {h['aquafair_staple_kg']:,} kg</td>
-  </tr>
-  <tr style="border-bottom:1px solid {LINE};">
-    <td style="padding:13px 6px;color:{INK};font-weight:600;">
-        Crops lost entirely</td>
-    <td style="text-align:right;padding:13px 6px;color:{BAD};
-               font-weight:700;font-size:{T_HEAD};">
-        {h['yieldmax_crops_lost']}</td>
-    <td style="text-align:right;padding:13px 10px;color:{OK};
-               font-weight:700;font-size:{T_HEAD};background:{TINT};">
-        {h['aquafair_crops_lost']}</td>
-  </tr>
-{small_row}
-</table>""", unsafe_allow_html=True)
 
-    # ⚠ "More food" is NOT universal — it depends on the crop mix.
-    # Sugarcane yields 7 kg/m2 against ragi's 0.25, so on a canal command
-    # area growing cane, 85% of total tonnage is sugarcane and a policy
-    # that feeds the cane and starves everything else wins on kilograms.
-    # The claim that holds on every source is "loses no crops". Say that
-    # one out loud; let this line appear only when it is actually true.
-    if h["food_gain_kg"] > 0:
-        st.markdown(
-            f"<p style='margin-top:12px;color:{INK};font-size:{T_BODY};'>"
-            f"AquaFair produces <b>{h['food_gain_kg']:,} kg more food</b> "
-            f"({h['food_gain_pct']:+.1f}%) while losing no crops. A dead crop "
-            f"wastes a whole season of water.</p>", unsafe_allow_html=True)
+def _kg(v):
+    return f"{v:,.0f} kg"
+
+
+def _litres(v):
+    return f"{v:,.0f} L"
+
+
+def _pct(v, shown=True):
+    return f"{v:.0f}%" if shown else "\u2014"
+
+
+def _difference(ym, aq, kind, better="high"):
+    """(text, aquafair_is_ahead) for the difference column.
+
+    `kind` decides the words: a count reads "2 fewer", a percentage
+    reads "+68 points", a quantity carries its unit. `better` says which
+    direction counts as winning, because fewer crops lost is a win and
+    fewer kilograms is not."""
+    gap = aq - ym
+    if abs(gap) < 0.5:
+        return "same", False
+
+    ahead = gap > 0 if better == "high" else gap < 0
+
+    if kind == "count":
+        n = abs(int(round(gap)))
+        word = "fewer" if gap < 0 else "more"
+        return f"{n} {word}", ahead
+    if kind == "avoided":
+        # A liability row reads backwards as a signed number: owing
+        # less is a win, and a minus sign does not look like one.
+        # Say what happened to the money instead.
+        return ((f"{_rupees(-gap)} avoided" if gap < 0
+                 else f"{_rupees(gap)} more owed"), ahead)
+    if kind == "points":
+        sign = "+" if gap > 0 else "\u2212"
+        n = abs(gap)
+        return f"{sign}{n:.0f} point" + ("" if round(n) == 1 else "s"), ahead
+    if kind == "rupees":
+        sign = "+" if gap > 0 else "\u2212"
+        return f"{sign}{_rupees(abs(gap))}", ahead
+    if kind == "litres":
+        sign = "+" if gap > 0 else "\u2212"
+        return f"{sign}{_litres(abs(gap))}", ahead
+    sign = "+" if gap > 0 else "\u2212"
+    return f"{sign}{_kg(abs(gap))}", ahead
+
+
+def impact_rows(sc):
+    """The comparison as data: one dict per row, values straight from
+    the scorecard, so the table and the workings cannot drift apart."""
+    ym, aq, cp = sc["yield_max"], sc["equity"], sc["current"]
+    smallholder_acres = SMALLHOLDER_AREA_M2 / M2_PER_ACRE
+    has_small = aq["has_smallholders"]
+
+    return [
+        {"label": "Total food produced",
+         "note": "every farm's expected harvest, scaled down by how "
+                 "little water it actually got",
+         "cp": cp["total_yield_kg"], "ym": ym["total_yield_kg"],
+         "aq": aq["total_yield_kg"],
+         "fmt": _kg, "kind": "kg", "better": "high"},
+
+        {"label": "Staple food produced",
+         "note": "the same sum over staples and pulses only. Cane runs "
+                 "28x heavier per hectare than ragi, so raw tonnage can "
+                 "be won by feeding cash crops and starving food",
+         "cp": cp["staple_yield_kg"], "ym": ym["staple_yield_kg"],
+         "aq": aq["staple_yield_kg"],
+         "fmt": _kg, "kind": "kg", "better": "high"},
+
+        {"label": "Crops lost entirely",
+         "note": "a farm below its survival minimum loses the whole "
+                 "season, wasting every litre already spent on it",
+         "cp": cp["crops_lost"], "ym": ym["crops_lost"],
+         "aq": aq["crops_lost"],
+         "fmt": lambda v: f"{v:,.0f}", "kind": "count", "better": "low",
+         "loud": True},
+
+        {"label": "Farms below survival minimum",
+         "note": "the same test as the row above, counted as farms — one "
+                 "farm grows one crop here, so the two always match",
+         "cp": cp["farms_below_survival"], "ym": ym["farms_below_survival"],
+         "aq": aq["farms_below_survival"],
+         "fmt": lambda v: f"{v:,.0f}", "kind": "count", "better": "low"},
+
+        {"label": "Farms receiving nothing",
+         "note": "farms allocated zero litres — under head-to-tail these "
+                 "are the tail-enders the channel never reached",
+         "cp": cp["farms_with_nothing"], "ym": ym["farms_with_nothing"],
+         "aq": aq["farms_with_nothing"],
+         "fmt": lambda v: f"{v:,.0f}", "kind": "count", "better": "low"},
+
+        {"label": "Smallholder harvest kept",
+         "note": (f"what farms under {smallholder_acres:.1f} acres kept of "
+                  f"their full harvest" if has_small
+                  else "no holdings under 2 ha in this command area"),
+         "cp": cp["smallholder_kept_pct"], "ym": ym["smallholder_kept_pct"],
+         "aq": aq["smallholder_kept_pct"],
+         "fmt": lambda v: _pct(v, has_small), "kind": "points",
+         "better": "high", "compare": has_small},
+
+        {"label": "Largest farm harvest kept",
+         "note": f"the biggest holding in the command area "
+                 f"({aq['largest_farm_id']}) — what equity costs the farm "
+                 f"that would otherwise be served first",
+         "cp": cp["largest_farm_kept_pct"], "ym": ym["largest_farm_kept_pct"],
+         "aq": aq["largest_farm_kept_pct"],
+         "fmt": lambda v: f"{v:.0f}%", "kind": "points", "better": "high"},
+
+        {"label": "Water actually used",
+         "note": "every policy spends the same pool — the argument is "
+                 "about who receives it, not how much is released",
+         "cp": cp["water_used_L"], "ym": ym["water_used_L"],
+         "aq": aq["water_used_L"],
+         "fmt": _litres, "kind": "litres", "better": "high"},
+
+        {"label": "Economic value of harvest",
+         "note": "each crop's realised kilograms at its own market "
+                 "price, MSP-anchored where one exists",
+         "cp": cp["value_rupees"], "ym": ym["value_rupees"],
+         "aq": aq["value_rupees"],
+         "fmt": _rupees, "kind": "rupees", "better": "high"},
+
+        {"label": "Compensation avoided",
+         "note": (f"what each policy would owe at "
+                  f"{_rupees(COMPENSATION_PER_ACRE_RUPEES)} an acre for "
+                  f"every crop lost — the difference is what AquaFair "
+                  f"does not have to pay"),
+         "cp": cp["compensation_rupees"], "ym": ym["compensation_rupees"],
+         "aq": aq["compensation_rupees"],
+         "fmt": _rupees, "kind": "avoided", "better": "low"},
+    ]
+
+
+def impact_headline(sc, infeasible):
+    """One sentence, composed from the two numbers that decide it.
+
+    Compared against current practice (head-to-tail), because that is the
+    real-world baseline a department official cares about. It has to be
+    able to say AquaFair lost — a headline that only fires when the
+    result is favourable is not a finding, it is a slogan."""
+    cp, aq = sc["current"], sc["equity"]
+    food = aq["total_yield_kg"] - cp["total_yield_kg"]
+    saved = cp["crops_lost"] - aq["crops_lost"]
+    pct = (abs(food) / cp["total_yield_kg"] * 100
+           if cp["total_yield_kg"] > 0 else 0.0)
+
+    def farms(n, word=""):
+        noun = "farm" if n == 1 else "farms"
+        return f"{n} {word} {noun}".replace("  ", " ")
+
+    # Losing on raw tonnage while winning on staples is the case a canal
+    # command area actually produces when it grows cane, and reporting
+    # only the tonnage would hand a judge the wrong conclusion.
+    staple_gain = aq.get("staple_yield_kg", 0) - cp.get("staple_yield_kg", 0)
+    staples = (f" Most of that tonnage is cash crop: AquaFair still "
+               f"produces {staple_gain:,.0f} kg more staple food."
+               if food <= 0 and staple_gain > 0 else "")
+
+    if food > 0 and saved > 0:
+        line = (f"Against how water is shared today, AquaFair produces "
+                f"{food:,.0f} kg more food and saves {farms(saved)} from "
+                f"total crop failure.")
+    elif food > 0 and saved == 0:
+        line = (f"Against how water is shared today, AquaFair produces "
+                f"{food:,.0f} kg more food, with the same "
+                f"{farms(aq['crops_lost'])} lost either way.")
+    elif food > 0:
+        line = (f"Against how water is shared today, AquaFair produces "
+                f"{food:,.0f} kg more food, but loses "
+                f"{farms(-saved, 'more')} to total crop failure.")
+    elif food == 0 and saved > 0:
+        line = (f"Both produce the same food, but current practice costs "
+                f"{farms(saved)} their entire harvest.")
+    elif food == 0 and saved == 0:
+        line = (f"Both produce the same {aq['total_yield_kg']:,.0f} kg "
+                + ("and lose no crops — there is enough water this cycle "
+                   "for the allocation not to matter."
+                   if aq["crops_lost"] == 0 else
+                   f"and lose the same {farms(aq['crops_lost'])}."))
+    elif saved > 0:
+        line = (f"Current practice produces {pct:.0f}% more food "
+                f"({abs(food):,.0f} kg), but costs {farms(saved)} their "
+                f"entire harvest.")
+    elif saved == 0:
+        line = (f"Current practice produces {pct:.0f}% more food "
+                f"({abs(food):,.0f} kg) and loses the same "
+                f"{farms(aq['crops_lost'])}. In these conditions AquaFair "
+                f"does not win.")
     else:
-        staple_gain = h["aquafair_staple_kg"] - h["yieldmax_staple_kg"]
-        extra = (f" and <b>{staple_gain:,} kg more staple food</b>"
-                 if staple_gain > 0 else "")
-        st.markdown(
-            f"<p style='margin-top:12px;color:{INK};font-size:{T_BODY};'>"
-            f"Maximising yield produces more raw tonnage here — most of it "
-            f"from a few high-yield cash crops — but it loses "
-            f"<b>{h['yieldmax_crops_lost']} crops entirely</b>. AquaFair "
-            f"loses none{extra}.</p>", unsafe_allow_html=True)
+        line = (f"Current practice produces {pct:.0f}% more food "
+                f"({abs(food):,.0f} kg) and loses {farms(-saved, 'fewer')}. "
+                f"In these conditions AquaFair does not win.")
 
-    with st.expander("All four policies, side by side"):
-        st.dataframe(
-            {
-                "Policy": ["Maximise yield", "Equal split", "Emergency", "AquaFair"],
-                "Food (kg)": [scorecard[k]["total_yield_kg"]
-                              for k in ("yield_max", "naive", "emergency", "equity")],
-                "Staple (kg)": [scorecard[k]["staple_yield_kg"]
-                                for k in ("yield_max", "naive", "emergency", "equity")],
-                "Crops lost": [scorecard[k]["crops_lost"]
-                               for k in ("yield_max", "naive", "emergency", "equity")],
-                "Smallholder kept": [f"{scorecard[k]['smallholder_kept_pct']:.0f}%"
-                                     if scorecard[k].get("has_smallholders", True)
-                                     else "—"
-                                     for k in ("yield_max", "naive", "emergency", "equity")],
-                "Water used (L)": [scorecard[k]["water_used_L"]
-                                   for k in ("yield_max", "naive", "emergency", "equity")],
-            },
-            hide_index=True, width='stretch')
+    line += staples
+
+    if infeasible:
+        line += (" The pool is below every farm's survival minimum this "
+                 "cycle, so no policy can keep them all \u2014 this is a "
+                 "comparison between two kinds of failure.")
+    return line
+
+
+def render_impact(out):
+    """Headline, the comparison table, then the workings.
+
+    Takes the whole run rather than just the scorecard: the workings
+    quote real farms by name, and the headline has to know whether the
+    pool could cover the floors at all."""
+    sc = out["scorecard"]
+    infeasible = out["coordination"].get("supply_infeasible", False)
+
+    st.markdown(
+        f"<div style='font-size:{T_BODY};color:{INK};font-weight:600;"
+        f"line-height:1.5;margin:2px 0 12px 0;'>"
+        f"{impact_headline(sc, infeasible)}</div>",
+        unsafe_allow_html=True)
+
+    head = (f"<tr style='border-bottom:2px solid {INK};'>"
+            f"<th style='text-align:left;padding:8px 6px;'></th>"
+            f"<th style='text-align:right;padding:8px 6px;color:{GREY};"
+            f"font-size:{T_SMALL};font-weight:600;'>Current practice</th>"
+            f"<th style='text-align:right;padding:8px 6px;color:{GREY};"
+            f"font-size:{T_SMALL};font-weight:600;'>Maximise yield</th>"
+            f"<th style='text-align:right;padding:8px 10px;color:{INK};"
+            f"font-size:{T_SMALL};font-weight:700;background:{TINT};'>"
+            f"AquaFair</th>"
+            f"<th style='text-align:right;padding:8px 6px;color:{GREY};"
+            f"font-size:{T_SMALL};font-weight:600;'>vs current practice</th>"
+            f"</tr>")
+
+    body = ""
+    for r in impact_rows(sc):
+        if r.get("compare", True):
+            diff, ahead = _difference(r["cp"], r["aq"], r["kind"],
+                                      r["better"])
+        else:
+            diff, ahead = "\u2014", False
+        pad = "13px" if r.get("loud") else "9px"
+        big = f"font-size:{T_HEAD};" if r.get("loud") else ""
+        body += (
+            f"<tr style='border-bottom:1px solid {LINE};vertical-align:top;'>"
+            f"<td style='padding:{pad} 6px;'>"
+            f"<div style='color:{INK};font-weight:600;'>{r['label']}</div>"
+            f"<div style='color:{GREY};font-size:{T_SMALL};"
+            f"line-height:1.4;margin-top:2px;'>{r['note']}</div></td>"
+            f"<td style='text-align:right;padding:{pad} 6px;color:{GREY};"
+            f"white-space:nowrap;{big}'>{r['fmt'](r['cp'])}</td>"
+            f"<td style='text-align:right;padding:{pad} 6px;color:{GREY};"
+            f"white-space:nowrap;{big}'>{r['fmt'](r['ym'])}</td>"
+            f"<td style='text-align:right;padding:{pad} 10px;color:{INK};"
+            f"font-weight:700;background:{TINT};white-space:nowrap;{big}'>"
+            f"{r['fmt'](r['aq'])}</td>"
+            f"<td style='text-align:right;padding:{pad} 6px;"
+            f"white-space:nowrap;font-weight:700;"
+            f"color:{OK if ahead else GREY};{big}'>{diff}</td></tr>")
+
+    st.markdown(
+        f"<table style='width:100%;border-collapse:collapse;"
+        f"font-size:{T_BODY};'>{head}{body}</table>",
+        unsafe_allow_html=True)
+
+    with st.expander("how each figure is calculated"):
+        render_impact_working(out)
+
+    # The status quo leads, because it is the thing being replaced.
+    # AquaFair is last, because it is the claim.
+    policies = [
+        ("current",   "Current practice (head-to-tail)"),
+        ("yield_max", "Maximise yield"),
+        ("naive",     "Equal split"),
+        ("emergency", "Emergency"),
+        ("equity",    "AquaFair"),
+    ]
+    # Policies across, metrics down. One row per policy needed seven
+    # columns of six-figure numbers and clipped the last one out of the
+    # panel; this way the widest row is five numbers wide, it fits the
+    # column, and it reads the same way round as the table above.
+    metrics = [
+        ("Food (kg)", "Total food produced, all crops",
+         lambda r: f"{r['total_yield_kg']:,}"),
+        ("Staple (kg)", "Staples and pulses only — food weight 1.0 or more",
+         lambda r: f"{r['staple_yield_kg']:,}"),
+        ("Crops lost", "Farms below their survival minimum",
+         lambda r: f"{r['crops_lost']}"),
+        ("Receiving nothing", "Tail-end farms receiving nothing at all",
+         lambda r: f"{r['farms_with_nothing']}"),
+        ("Smallholder kept", "Smallholder harvest kept",
+         lambda r: f"{r['smallholder_kept_pct']:.0f}%"),
+        ("Water used (kL)", "Water actually used, in thousands of litres",
+         lambda r: f"{r['water_used_L']/1000:,.0f}"),
+    ]
+
+    with st.expander("All five policies, side by side"):
+        thead = "<th style='padding:6px 8px 6px 0;'></th>" + "".join(
+            f"<th title='{label}' style='text-align:right;"
+            f"padding:6px 0 6px 7px;font-size:{T_SMALL};font-weight:700;"
+            f"color:{INK};cursor:help;"
+            f"{f'background:{TINT};' if key == 'equity' else ''}'>"
+            f"{label.split(' (')[0]}</th>"
+            for key, label in policies)
+
+        tbody = ""
+        for name, tip, fn in metrics:
+            tbody += (
+                f"<tr style='border-top:1px solid {LINE};'>"
+                f"<td title='{tip}' style='padding:7px 8px 7px 0;"
+                f"color:{GREY};font-size:{T_SMALL};cursor:help;'>{name}</td>"
+                + "".join(
+                    f"<td style='text-align:right;padding:7px 0 7px 7px;"
+                    f"color:{INK};font-size:{T_SMALL};white-space:nowrap;"
+                    f"{f'background:{TINT};font-weight:700;' if key == 'equity' else ''}'>"
+                    f"{fn(sc[key])}</td>" for key, _ in policies) + "</tr>")
+
+        st.markdown(
+            f"<div style='overflow-x:auto;'>"
+            f"<table style='width:100%;border-collapse:collapse;'>"
+            f"<tr>{thead}</tr>{tbody}</table></div>",
+            unsafe_allow_html=True)
+        st.write("")
+        st.markdown(
+            f"<div style='font-size:{T_SMALL};color:{GREY};line-height:1.6;'>"
+            f"<b style='color:{INK};'>Current practice (head-to-tail)</b> — "
+            f"farms nearest the channel head are served in full until the "
+            f"water runs out, with no method for deciding who loses. It is "
+            f"the status quo this replaces: when storage falls short in a "
+            f"canal command area there is often no systematic allocation "
+            f"at all, and the argument that follows goes to the revenue "
+            f"officer and then to court.<br>"
+            f"\"Receiving nothing\" counts farms allocated zero litres. "
+            f"Under head-to-tail those are the tail-enders the channel "
+            f"never reached; the other policies do not order farms by "
+            f"position, so for them it is simply who was left with "
+            f"nothing.</div>", unsafe_allow_html=True)
+
+
+def render_impact_working(out):
+    """The formula behind every row, and one live farm inside it.
+
+    The worked examples come from the allocation on screen, so a judge
+    can find the same farm on a card above and check the arithmetic
+    against it."""
+    sc = out["scorecard"]
+    claims = out["claims"]
+    alloc = out["allocation"]
+    aq, ym = sc["equity"], sc["yield_max"]
+
+    by_id = {c["farm_id"]: c for c in claims}
+    biggest = max(claims, key=lambda c: c["expected_yield_kg"])
+    a = alloc[biggest["farm_id"]]
+    got = a["total_L"]
+    need = max(1, biggest["water_required_L"])
+    kg = compute_actual_yield(biggest, got)
+    shortage = 1 - min(1.0, got / need)
+
+    def block(title, formula, *examples):
+        st.markdown(
+            f"<div style='margin:12px 0 0 0;'>"
+            f"<div style='color:{INK};font-weight:600;font-size:{T_BODY};'>"
+            f"{title}</div>"
+            f"<div style='color:{GREY};font-size:{T_SMALL};margin:3px 0 0 0;"
+            f"line-height:1.5;'>{formula}</div>"
+            + "".join(
+                f"<div style='color:{INK};font-size:{T_SMALL};margin-top:4px;"
+                f"padding-left:10px;border-left:2px solid {LINE};"
+                f"line-height:1.5;'>{e}</div>" for e in examples)
+            + "</div>", unsafe_allow_html=True)
+
+    block("Total food produced",
+          "sum over farms of expected_yield_kg x (1 - Ky x shortage), "
+          "clamped to 0-1. Below the survival floor the harvest tapers "
+          "linearly to zero instead of stepping off a cliff.",
+          f"{biggest['farm_id']} {biggest['crop']}: "
+          f"{biggest['expected_yield_kg']:,} kg x (1 - {biggest['ky']:.2f} x "
+          f"{shortage:.2f}) = {kg:,} kg",
+          f"across all {len(claims)} farms = {aq['total_yield_kg']:,} kg "
+          f"of a possible {aq['potential_yield_kg']:,} kg")
+
+    block("Staple food produced",
+          "the same sum, restricted to crops with a food weight of 1.0 "
+          "or more \u2014 the staples and pulses eaten locally.",
+          f"{aq['staple_yield_kg']:,} kg of a possible "
+          f"{aq['staple_potential_kg']:,} kg = "
+          f"{aq['staple_kept_pct']:.1f}% kept")
+
+    lost = aq["lost_farm_ids"]
+    saved_ids = [f for f in ym["lost_farm_ids"] if f not in lost]
+    if lost:
+        c = by_id[lost[0]]
+        example = (f"{c['farm_id']} got "
+                   f"{alloc[c['farm_id']]['total_L']:,} L against a floor of "
+                   f"{c['survival_minimum_L']:,} L — counted as lost")
+    else:
+        c = claims[0]
+        example = (f"{c['farm_id']} got {alloc[c['farm_id']]['total_L']:,} L "
+                   f"against a floor of {c['survival_minimum_L']:,} L — "
+                   f"above it, so not counted")
+    block("Crops lost entirely, and farms below survival minimum",
+          "count of farms whose allocation is below their "
+          "survival_minimum_L. One farm grows one crop in this model, so "
+          "both rows report the same count from the same test.",
+          example,
+          f"AquaFair loses {len(lost)}, maximise-yield loses "
+          f"{len(ym['lost_farm_ids'])}")
+
+    block("Smallholder harvest kept",
+          "realised kg summed over farms under "
+          f"{SMALLHOLDER_AREA_M2/M2_PER_ACRE:.1f} acres, divided by the "
+          "same farms' expected kg.",
+          f"{aq['smallholder_yield_kg']:,} kg of "
+          f"{aq['smallholder_potential_kg']:,} kg = "
+          f"{aq['smallholder_kept_pct']:.1f}%")
+
+    lf = by_id.get(aq["largest_farm_id"])
+    if lf is not None:
+        lf_kg = compute_actual_yield(lf, alloc[lf["farm_id"]]["total_L"])
+        block("Largest farm harvest kept",
+              "the same ratio for the single largest farm by area.",
+              f"{lf['farm_id']} {lf['crop']}, "
+              f"{lf['area_m2']/M2_PER_ACRE:.1f} acres: {lf_kg:,} kg of "
+              f"{lf['expected_yield_kg']:,} kg = "
+              f"{aq['largest_farm_kept_pct']:.1f}%")
+
+    block("Water actually used",
+          "sum of every farm's allocation. Every column draws on the "
+          "same pool, which is why this row should read the same across.",
+          f"AquaFair {aq['water_used_L']:,} L, maximise-yield "
+          f"{ym['water_used_L']:,} L, pool {out['tank_L']:,.0f} L")
+
+    price = MARKET_PRICE_PER_KG[biggest["crop"]]
+    block("Economic value of harvest",
+          "sum over farms of realised kg x that crop's market price. "
+          "Prices are MSP-anchored where an MSP exists; tomato and "
+          "onion have none and are volatile.",
+          f"{biggest['farm_id']} {biggest['crop']}: {kg:,} kg x "
+          f"{_rupees(price)} = {_rupees(kg * price)}",
+          f"across all farms = {_rupees(aq['value_rupees'])}")
+
+    if saved_ids:
+        saved_acres = sum(by_id[f]["area_m2"] for f in saved_ids) / M2_PER_ACRE
+        detail = (f"{len(saved_ids)} farm(s) AquaFair keeps alive that "
+                  f"maximise-yield loses: {saved_acres:,.1f} acres x "
+                  f"{_rupees(COMPENSATION_PER_ACRE_RUPEES)} = "
+                  f"{_rupees(ym['compensation_rupees'] - aq['compensation_rupees'])} "
+                  f"not owed")
+    else:
+        detail = ("AquaFair rescues no farm that maximise-yield loses in "
+                  "these conditions, so there is nothing avoided to claim.")
+    block("Compensation avoided",
+          f"for every farm below its floor: acres x "
+          f"{_rupees(COMPENSATION_PER_ACRE_RUPEES)}, the National Disaster "
+          f"Response Fund rate for irrigated crop loss "
+          f"(\u20b917,000 per hectare). The row shows what each policy "
+          f"would owe; the difference is what AquaFair avoids.",
+          f"AquaFair would owe {_rupees(aq['compensation_rupees'])}, "
+          f"maximise-yield {_rupees(ym['compensation_rupees'])}",
+          detail)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -1056,15 +1472,19 @@ def trace_agent_4(out):
     alloc = out["allocation"]
 
     L = [
-        "BASELINE — naive equal split",
-        "  The pool divided equally across farms. Water a farm cannot use is",
-        "  recycled to the others in further equal rounds, so this is the",
-        "  strong version of the baseline, not a strawman that wastes water.",
+        "BASELINES — what AquaFair is measured against",
+        "  Current practice: served from the head of the channel, each farm",
+        "  taking its full requirement until the water runs out. No floor,",
+        "  no priority, no negotiation — position is the only input.",
+        "  Naive equal split: the pool divided equally, and water a farm",
+        "  cannot use recycled to the others in further equal rounds, so",
+        "  this is the strong version, not a strawman that wastes water.",
         "",
         f"{'POLICY':<20}{'FOOD kg':>10}{'STAPLE kg':>11}{'LOST':>6}"
         f"{'SMALL KEPT':>12}{'WATER L':>12}",
     ]
-    names = [("yield_max", "maximise yield"), ("naive", "equal split"),
+    names = [("current", "current practice"),
+             ("yield_max", "maximise yield"), ("naive", "equal split"),
              ("emergency", "emergency split"), ("equity", "AquaFair")]
     for key, label in names:
         row = sc[key]
@@ -1271,6 +1691,21 @@ def note_condition_change(label, eto, rainfall_mm, shortfall):
     }
 
 
+def next_tail_position(source_id):
+    """Where a newly registered plot sits on the channel.
+
+    Behind the current tail of its own source. A farm added mid-demo has
+    no surveyed position, and the alternatives are worse: defaulting to
+    zero would put it at the sluice and hand it the whole pool under
+    current practice, which is a claim we would be inventing on its
+    behalf. Last in line is the honest default for a plot nobody has
+    measured."""
+    served = [f.get("distance_from_head_m") or 0
+              for f in st.session_state.farms
+              if f.get("source_id") == source_id]
+    return (max(served) + 40) if served else 40
+
+
 def next_farm_id():
     used = {f["farm_id"] for f in st.session_state.farms}
     i = 1
@@ -1437,6 +1872,8 @@ def main():
                                 1, round(area_m2 * TYPICAL_YIELD_KG_PER_M2[crop])),
                             "is_smallholder": area_m2 < SMALLHOLDER_AREA_M2,
                             "fairness_debt": round(debt, 2),
+                            "distance_from_head_m": next_tail_position(
+                                ss.source_id),
                         })
                         ss.notice = ("success",
                                      f"Added {clean}'s {crop} under "
@@ -1501,9 +1938,9 @@ def main():
             f"margin:-4px 0 12px 0;'>"
             f"<span style='color:{OK};'>&#9632;</span> full share"
             f"&nbsp;&nbsp;<span style='color:{WARN};'>&#9632;</span> "
-            f"partly short&nbsp;&nbsp;"
-            f"<span style='color:{BAD};'>&#9632;</span> badly short "
-            f"or contested</div>", unsafe_allow_html=True)
+            f"above survival, reduced yield&nbsp;&nbsp;"
+            f"<span style='color:{BAD};'>&#9632;</span> below survival, "
+            f"the crop fails</div>", unsafe_allow_html=True)
         render_farm_cards(out["claims"], out["allocation"], limit=12)
 
     with right:
@@ -1521,7 +1958,7 @@ def main():
         # evidence, and it is the panel that grows with the run, so it
         # is the one that should absorb the leftover column height.
         section("Impact")
-        render_impact(out["scorecard"])
+        render_impact(out)
 
         st.write("")
         section("What the agents did")
