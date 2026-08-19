@@ -19,6 +19,7 @@ misses a whole class of Streamlit error. Section 11 clicks the real
 controls for that reason.
 """
 
+import os
 import sys
 import traceback
 
@@ -77,60 +78,58 @@ def _sources_db():
     import db
     loaded = S.load_sources(refresh=True)
     assert loaded, "the sources table loaded but holds no records"
-    return f"{db.DB_PATH.name}: {len(loaded)} source(s)"
+    return f"{os.path.basename(db.DB_PATH)}: {len(loaded)} source(s)"
 
 
 check("SQLite registry loads and validates", _sources_db)
 
 
-def _json_seeds_db():
-    """The JSON is the editable source; the database must reflect it.
-
-    Two copies of the same four tanks that could disagree would be
-    worse than one — this asserts they cannot."""
-    import db
-    j = db.read_json()
-    d = S.load_sources(refresh=True)
-    assert set(j) == set(d), \
-        f"sources.json and the database hold different ids: {set(j) ^ set(d)}"
-    for sid in j:
-        for field in ("live_storage_L", "capacity_L",
-                      "conveyance_efficiency", "command_area_ha"):
-            assert j[sid][field] == d[sid][field], (
-                f"{sid}.{field}: sources.json says {j[sid][field]}, the "
-                f"database says {d[sid][field]} — run python db.py --rebuild")
-    return f"{db.JSON_PATH.name} and {db.DB_PATH.name} agree on {len(j)} source(s)"
-
-
-check("JSON source and database agree", _json_seeds_db)
-
-
 def _db_constraints():
-    """The CHECK constraints must actually be enforced.
+    """The CHECK constraints on `sources` must actually be enforced.
 
-    A schema whose constraints were dropped in a rebuild would accept a
-    gauge reading above full supply level, and nothing downstream would
-    notice until an allocation looked wrong. Cheap to verify, rolled
-    back immediately."""
+    A schema without them accepts a gauge reading above full supply
+    level, and nothing downstream notices until an allocation looks
+    wrong. Rolled back immediately.
+
+    ⚠ TWO WAYS THIS FAILS, and they need different fixes:
+      * db.py's CREATE TABLE has no CHECK clauses — add them
+      * db.py has them but aquafair.db predates them. CREATE TABLE IF
+        NOT EXISTS is a no-op on an existing table, so a database built
+        before the constraints keeps the old shape forever. Delete
+        aquafair.db and let init_db() rebuild it."""
     import sqlite3, db
-    con = db.connect()
+    conn = sqlite3.connect(db.DB_PATH)
+    ddl = (conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'"
+    ).fetchone() or [""])[0] or ""
+    if "CHECK" not in ddl.upper():
+        conn.close()
+        raise AssertionError(
+            "the `sources` table has no CHECK constraints. Either db.py's "
+            "CREATE TABLE is missing them, or aquafair.db was built "
+            "before they were added — CREATE TABLE IF NOT EXISTS will "
+            "not add them to an existing table. Delete aquafair.db and "
+            "rerun to rebuild it.")
+    conn = sqlite3.connect(db.DB_PATH)
     try:
         for sql, tag in [
-            ("UPDATE sources SET live_storage_L = 99000000 WHERE id='T01'",
+            ("UPDATE sources SET live_storage_L = 9.9e12 WHERE source_id='T01'",
              "storage above capacity"),
-            ("UPDATE sources SET conveyance_efficiency = 1.5 WHERE id='T01'",
+            ("UPDATE sources SET conveyance_efficiency = 1.5 WHERE source_id='T01'",
              "efficiency above 1.0"),
+            ("UPDATE sources SET command_area_ha = 0 WHERE source_id='T01'",
+             "zero command area"),
             ("INSERT INTO sources VALUES ('X01','B','river',1,1,0.5,1,'W')",
              "type outside tank/canal"),
         ]:
             try:
-                con.execute(sql)
-                raise AssertionError(f"database accepted {tag}")
+                conn.execute(sql)
+                raise AssertionError(f"the database accepted {tag}")
             except sqlite3.IntegrityError:
                 pass
     finally:
-        con.rollback()
-        con.close()
+        conn.rollback()
+        conn.close()
     return "bad writes refused by the schema, not by Python"
 
 
@@ -138,15 +137,22 @@ check("database constraints are enforced", _db_constraints)
 
 
 def _farms_file():
-    from generate import DEMO_FARMS_CSV, load_demo_spec
-    spec = load_demo_spec()
-    assert spec, "demo_farms.csv loaded but holds no rows"
-    known = {s for s in S.list_sources()}
-    orphans = sorted({r["source_id"] for r in spec} - known)
+    """The demo farms load, and every one names a real command area.
+
+    Reads through demo_farms() rather than a loader private to one
+    version of generate.py: the farms have lived in a Python literal, in
+    a CSV and in a database table across this project, and a check on
+    the data should not break each time they move. What matters is that
+    the farms exist and point at sources that exist."""
+    farms = demo_farms()
+    assert farms, "demo_farms() returned nothing — there is no demo set"
+    known = set(S.list_sources())
+    orphans = sorted({f["source_id"] for f in farms} - known)
     assert not orphans, (
-        f"{DEMO_FARMS_CSV.name} references source(s) not in the "
-        f"database: {orphans}")
-    return f"{DEMO_FARMS_CSV.name}: {len(spec)} farm(s)"
+        f"demo farms reference command area(s) that are not in the "
+        f"registry: {orphans}. Those farms are invisible on every "
+        f"screen, because the dashboard filters by source_id.")
+    return f"{len(farms)} farm(s) across {len(known)} command area(s)"
 
 
 check("demo_farms.csv loads and validates", _farms_file)
@@ -630,6 +636,237 @@ check("200 farms", _big)
 
 
 # ═════════════════════════════════════════════════════════════════
+print("\n=== 8b. the record (db.py) ===")
+
+import db                                                 # noqa: E402
+
+
+def _record_schema():
+    db.init_db()
+    roster = db.list_officers()
+    assert roster, "no officers seeded — the login screen has nothing to offer"
+    roles = {o["role"] for o in roster}
+    assert roles <= set(db.ROLES), f"unknown role(s): {roles - set(db.ROLES)}"
+    for role in db.ROLES:
+        assert role in db.ROLE_LABEL, f"{role} has no display label"
+    return f"{len(roster)} officer(s), roles {sorted(roles)}"
+
+
+check("schema builds and the roster is seeded", _record_schema)
+
+
+def _login():
+    ok = db.verify_officer("WUA-T01-007", "password")
+    assert ok, "the seeded secretary cannot sign in"
+    assert ok["role"] == db.ROLE_SECRETARY
+    assert db.verify_officer("WUA-T01-007", "wrong") is None, \
+        "a wrong password was accepted"
+    assert db.verify_officer("NOBODY", "password") is None, \
+        "an unknown id was accepted"
+    assert db.verify_officer("  WUA-T01-007  ", "password"), \
+        "a pasted id with spaces was rejected"
+    return "right password in, wrong password out, id trimmed"
+
+
+check("sign-in accepts and rejects correctly", _login)
+
+
+def _saved_run():
+    """One run, written and read back. The numbers must be the STORED
+    ones — a record that recomputes on open would show today's answer
+    under an old date."""
+    out = _run("T01", "drought", "equity")
+    cond = {"source_id": "T01", "eto": out["weather"]["ETo"],
+            "rainfall_mm": out["weather"]["rainfall_mm"],
+            "stored_L": S.get_source("T01")["live_storage_L"],
+            "conveyance_pct": S.get_source("T01")["conveyance_efficiency"],
+            "deliverable_L": out["tank_L"],
+            "rounds_used": out["coordination"]["rounds_used"]}
+    rid = db.save_run(cond, out["allocation"], out["claims"], "equity")
+    detail = db.run_detail(rid)
+    assert detail, f"run {rid} was written but cannot be read back"
+    assert len(detail["allocations"]) == len(out["claims"]), \
+        "the record holds a different number of farms than the run had"
+    stored = {r["farm_id"]: r for r in detail["allocations"]}
+    for c in out["claims"]:
+        live = out["allocation"][c["farm_id"]]
+        row = stored[c["farm_id"]]
+        assert row["allocated_L"] == live["total_L"], (
+            f"{c['farm_id']}: recorded {row['allocated_L']:,} L but the "
+            f"run allocated {live['total_L']:,} L")
+        assert row["required_L"] == c["water_required_L"]
+    return f"run #{rid}, {len(stored)} farms stored to the litre"
+
+
+check("a run writes and reads back unchanged", _saved_run)
+
+
+def _no_duplicates():
+    """Streamlit reruns on every keystroke and each rerun calls
+    save_run. Without the guard one demo leaves hundreds of identical
+    rows and the decision log is unusable."""
+    out = _run("T02", "drought", "equity")
+    cond = {"source_id": "T02", "eto": out["weather"]["ETo"],
+            "rainfall_mm": out["weather"]["rainfall_mm"],
+            "stored_L": S.get_source("T02")["live_storage_L"],
+            "conveyance_pct": S.get_source("T02")["conveyance_efficiency"],
+            "deliverable_L": out["tank_L"],
+            "rounds_used": out["coordination"]["rounds_used"]}
+    first = db.save_run(cond, out["allocation"], out["claims"], "equity")
+    again = [db.save_run(cond, out["allocation"], out["claims"], "equity")
+             for _ in range(5)]
+    assert all(r == first for r in again), \
+        f"5 identical saves produced run ids {[first] + again}"
+
+    # A different policy IS a different decision and must be recorded.
+    other = _run("T02", "drought", "emergency")
+    cond["rounds_used"] = other["coordination"]["rounds_used"]
+    changed = db.save_run(cond, other["allocation"], other["claims"],
+                          "emergency")
+    assert changed != first, \
+        "a different policy reused the previous run id"
+    return f"5 reruns -> one row (#{first}); a policy change -> #{changed}"
+
+
+check("identical reruns do not duplicate the record", _no_duplicates)
+
+
+def _append_only():
+    """The rule must live in the schema, not in a habit. A future
+    feature, a teammate's script or the sqlite3 command line must all
+    be refused."""
+    import sqlite3
+    out = _run("C02", "drought", "equity")
+    cond = {"source_id": "C02", "eto": 6.2, "rainfall_mm": 0,
+            "stored_L": 1, "conveyance_pct": 0.5,
+            "deliverable_L": out["tank_L"], "rounds_used": 1}
+    rid = db.save_run(cond, out["allocation"], out["claims"], "equity")
+
+    conn = sqlite3.connect(db.DB_PATH)
+    try:
+        for sql, tag in [
+            ("UPDATE allocations SET allocated_L = 1", "edit an allocation"),
+            ("DELETE FROM allocations", "delete allocations"),
+            ("DELETE FROM runs", "delete a run"),
+            (f"UPDATE runs SET eto = 99 WHERE run_id = {rid}",
+             "edit a stored reading"),
+        ]:
+            try:
+                conn.execute(sql)
+                raise AssertionError(f"the database accepted: {tag}")
+            except sqlite3.IntegrityError:
+                pass
+    finally:
+        conn.rollback()
+        conn.close()
+    return "edits and deletes refused by the schema, not by Python"
+
+
+check("the record is append-only", _append_only)
+
+
+def _approval():
+    out = _run("T01", "normal", "equity")
+    cond = {"source_id": "T01", "eto": 5.0, "rainfall_mm": 0,
+            "stored_L": 700_000, "conveyance_pct": 0.8,
+            "deliverable_L": out["tank_L"], "rounds_used": 1}
+    rid = db.save_run(cond, out["allocation"], out["claims"], "equity")
+
+    before = db.run_detail(rid)["run"]
+    if before["approved_by"] is None:
+        db.approve_run(rid, "WRD-ERD-042")
+    after = db.run_detail(rid)["run"]
+    assert after["approved_by"] == "WRD-ERD-042", "the approval did not stick"
+    assert after["approved_at"], "an approval was recorded with no timestamp"
+    assert after["approved_name"], \
+        "the approver's name is not resolved — a log that reads " \
+        "'approved by WRD-ERD-042' is readable only by its author"
+
+    try:
+        db.approve_run(rid, "WUA-T01-007")
+        raise AssertionError("a second signature was accepted")
+    except db.AppendOnlyError:
+        pass
+    return f"run #{rid} signed once, reassignment refused"
+
+
+check("an approval is given once and not reassigned", _approval)
+
+
+def _integrity():
+    """The hash must pass on a clean row and fail on a mismatched one.
+
+    ⚠ The tampered case is INSERTED, not edited. The append-only
+    triggers refuse an UPDATE of input_hash — which is the schema being
+    stricter than this test needed, and worth knowing. So the bad row is
+    written as a new run whose stored hash does not match its stored
+    readings, which is what a rewritten file would look like."""
+    import sqlite3, db
+    out = _run("C01", "drought", "equity")
+    src = S.get_source("C01")
+    cond = {"source_id": "C01", "eto": out["weather"]["ETo"],
+            "rainfall_mm": out["weather"]["rainfall_mm"],
+            "stored_L": src["live_storage_L"],
+            "conveyance_pct": src["conveyance_efficiency"],
+            "deliverable_L": out["tank_L"],
+            "rounds_used": out["coordination"]["rounds_used"]}
+    good = db.save_run(cond, out["allocation"], out["claims"], "equity")
+    assert db.verify_integrity(good) is True, \
+        f"run #{good} fails its own integrity check as written"
+
+    conn = sqlite3.connect(db.DB_PATH)
+    try:
+        cur = conn.execute(
+            "INSERT INTO runs (timestamp, source_id, eto, rainfall_mm, "
+            "stored_L, conveyance_pct, deliverable_L, policy_mode, "
+            "rounds_used, approved_by, approved_at, input_hash) "
+            "VALUES ('2026-01-01T00:00:00','C01',6.2,0,1,0.5,1,'equity',"
+            "1,NULL,NULL,'not-the-real-hash')")
+        bad = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert db.verify_integrity(bad) is False, \
+        "a row whose hash does not match its readings still verified"
+    assert db.verify_integrity(10**9) is None, \
+        "verify_integrity should return None for a run that does not exist"
+    return "clean row verifies, mismatched row does not"
+
+
+check("integrity check detects tampering", _integrity)
+
+
+def _farm_history():
+    """The row a farmer actually wants: one bad week is weather, the
+    same farm short every cycle is a policy failing them."""
+    hist = db.farm_history("F001", limit=10)
+    assert hist, "F001 has been allocated but has no history"
+    row = hist[0]
+    for f in ("timestamp", "source_id", "policy_mode", "allocated_L",
+              "required_L", "satisfaction"):
+        assert f in row, f"farm history is missing {f}"
+    return f"F001 appears in {len(hist)} recorded cycle(s)"
+
+
+check("farm history reads back", _farm_history)
+
+
+def _recent_runs():
+    runs = db.recent_runs("T01", limit=20)
+    assert runs, "T01 has recorded runs but recent_runs returned none"
+    ids = [r["run_id"] for r in runs]
+    assert ids == sorted(ids, reverse=True), "runs are not newest-first"
+    assert all(r["source_id"] == "T01" for r in runs), \
+        "recent_runs leaked another command area's runs"
+    assert runs[0]["farm_count"] > 0, "a run was recorded with no farms"
+    return f"{len(runs)} run(s) on T01, newest first"
+
+
+check("recent runs are scoped and ordered", _recent_runs)
+
+
+# ═════════════════════════════════════════════════════════════════
 def _finish():
     print("\n" + "=" * 70)
     if FAILS:
@@ -701,8 +938,34 @@ if AppTest is not None:
     for _h in logging.getLogger("streamlit").handlers + logging.root.handlers:
         _h.addFilter(_DropBareModeNoise())
 
-    def _render(setup=None, timeout=90):
+    # ⚠ SIGN IN BEFORE ASSERTING ANYTHING.
+    # app.py opens on a login screen. A test that only calls at.run()
+    # renders that screen, finds no farm cards, hits no exception and
+    # reports a pass — coverage that proves nothing. Every helper below
+    # seeds a session first.
+    # ⚠ ONE LINE TO CHECK AGAINST YOUR app.py.
+    # This is the session_state key app.py stores the signed-in user
+    # under. app.py writes ss.officer in sign_in() and gates on
+    # `if ss.officer is None`, so that is the name here. If the login
+    # is ever rewritten to use a different key, change this one line
+    # and sections 9-12 follow.
+    SESSION_KEY = "officer"
+
+    OFFICER = {"officer_id": "WRD-ERD-042", "name": "R. Chandrasekaran",
+               "role": db.ROLE_OFFICER, "source_id": "C01", "farm_id": None}
+    SECRETARY = {"officer_id": "WUA-T01-007", "name": "Selvi Ramanathan",
+                 "role": db.ROLE_SECRETARY, "source_id": "T01",
+                 "farm_id": None}
+    FARMER = {"officer_id": "FARM-T01-F002", "name": "Kavitha",
+              "role": db.ROLE_FARMER, "source_id": "T01", "farm_id": "F002"}
+
+    def _sign_in(at, user=None):
+        at.session_state[SESSION_KEY] = dict(user or OFFICER)
+
+    def _render(setup=None, timeout=90, user=None):
         at = AppTest.from_file("app.py", default_timeout=timeout)
+        at.run()
+        _sign_in(at, user)
         at.run()
         if setup:
             setup(at)
@@ -710,6 +973,37 @@ if AppTest is not None:
         if at.exception:
             raise AssertionError(str(at.exception[0].value))
         return at
+
+
+    def _signed_in(at):
+        """True if the page got past the login gate.
+
+        Checked by looking for a control only the signed-in page draws.
+        Asserting on 'no exception' alone would pass on the login screen
+        itself, which is the failure mode this whole block exists for."""
+        labels = {b.label for b in at.button}
+        return bool(labels & {"Demo set", "Load 100",
+                              "How the four agents worked"})
+
+
+    def _gate_is_wired():
+        """Fail loudly if SESSION_KEY is wrong.
+
+        Without this, a mismatched key makes every check in sections
+        9-12 silently test the login screen: no farm cards, no
+        exception, and a clean pass that proves nothing. Better to stop
+        here with the reason named."""
+        at = AppTest.from_file("app.py", default_timeout=90)
+        at.run()
+        _sign_in(at)
+        at.run()
+        assert _signed_in(at), (
+            f"signing in via session_state[{SESSION_KEY!r}] did not reach "
+            f"the dashboard. Either app.py has no login gate, or it "
+            f"stores the user under a different key — set SESSION_KEY at "
+            f"the top of this block to match render_login(). Until then "
+            f"every check below is testing the login screen.")
+        return f"session_state[{SESSION_KEY!r}] reaches the dashboard"
 
     def _weather(at, sid, scen):
         at.session_state["source_id"] = sid
@@ -719,7 +1013,27 @@ if AppTest is not None:
         at.session_state["w_tank_liters"] = float(S.deliverable_water_L(sid))
         at.session_state["scale_tank"] = False
 
-    check("opens clean on the default screen", lambda: _render() and None)
+    def _login_screen():
+        """The gate itself must render, and must NOT show the dashboard."""
+        at = AppTest.from_file("app.py", default_timeout=90)
+        at.run()
+        assert not at.exception, str(at.exception[0].value)
+        assert not _signed_in(at), \
+            "the dashboard rendered without anyone signing in"
+        return "login screen renders and holds the gate"
+
+    check("login screen", _login_screen)
+    check("the sign-in helper actually signs in", _gate_is_wired)
+
+
+    def _signed_in_screen():
+        at = _render()
+        assert _signed_in(at), \
+            "signed in, but the dashboard did not render — every " \
+            "dashboard check below would be testing the login screen"
+        return "officer session reaches the dashboard"
+
+    check("opens clean once signed in", _signed_in_screen)
 
     _combos = ([(s, sc, m) for s in S.list_sources()
                 for sc in SCENARIOS for m in MODES] if FULL else
@@ -790,8 +1104,10 @@ if AppTest is not None:
                 return True
         return False
 
-    def _sequence(labels, timeout=120, before=None):
+    def _sequence(labels, timeout=120, before=None, user=None):
         at = AppTest.from_file("app.py", default_timeout=timeout)
+        at.run()
+        _sign_in(at, user)
         at.run()
         if before:
             before(at)
@@ -813,8 +1129,7 @@ if AppTest is not None:
         check(_tag, lambda labels=_labels: _sequence(labels) and None)
 
     def _preset_lands():
-        at = AppTest.from_file("app.py", default_timeout=90)
-        at.run()
+        at = _render()
         _click(at, "Normal")
         at.run()
         before = at.session_state["w_ETo"]
@@ -830,8 +1145,7 @@ if AppTest is not None:
 
     def _preset_keeps_source_water():
         """A preset must NOT overwrite the command area's real volume."""
-        at = AppTest.from_file("app.py", default_timeout=90)
-        at.run()
+        at = _render()
         before = at.session_state["w_tank_liters"]
         _click(at, "Drought")
         at.run()
@@ -861,6 +1175,141 @@ if AppTest is not None:
 
     check("Load 100 button",
           lambda: _sequence(["Load 100"], timeout=200) and None)
+
+    # ─────────────────────────────────────────────────────────────
+    print("\n=== 12. dashboard: what each role may do ===")
+    # The roles are not cosmetic. A farmer who can see the whole command
+    # area, or a secretary who can approve their own run, would make the
+    # approval column meaningless — so these check the gates hold rather
+    # than that the pages merely render.
+
+    def _farmer_not_offered():
+        """Farmer rows exist on the roster; the gate refuses them.
+
+        Two things have to agree — the list on the login screen and the
+        check in sign_in(). A screen that offers a role the gate then
+        rejects is worse than one that never offered it, so this asserts
+        both ends."""
+        assert db.verify_officer("FARM-T01-F002", "password"), \
+            "the farmer rows are gone from the roster entirely — this " \
+            "check is about the gate, not about deleting the accounts"
+        at = AppTest.from_file("app.py", default_timeout=90)
+        at.run()
+        labels = {b.label for b in at.button}
+        offered = [l for l in labels if "Farmer" in l]
+        assert not offered, \
+            f"the login screen still offers a farmer account: {offered}"
+        return "farmer rows on the roster, not on the gate"
+
+    check("farmer accounts are not offered", _farmer_not_offered)
+
+
+    def _farmer_gate_refuses():
+        """Typing a farmer id must be refused with a reason, not let in
+        and then argued with screen by screen.
+
+        Calls app.sign_in() directly against a real session rather than
+        driving the form: AppTest has no form-submit handle, and the
+        callback is where the rule actually lives."""
+        import importlib
+        import streamlit as _st
+        app = importlib.import_module("app")
+
+        class _FakeState(dict):
+            __getattr__ = dict.get
+            def __setattr__(self, k, v): self[k] = v
+
+        saved = _st.session_state
+        fake = _FakeState(officer=None, login_error=None, viewing_run=None,
+                          readings={"ETo": 6.2, "rainfall_mm": 0.0,
+                                    "tank_liters": 560_000.0},
+                          source_id="T01")
+        _st.session_state = fake
+        try:
+            app.sign_in("FARM-T01-F002", "password")
+            assert fake["officer"] is None, \
+                "a farmer was admitted by sign_in()"
+            assert fake["login_error"], \
+                "a farmer was refused with no message — the login screen " \
+                "would show nothing and the click would look broken"
+
+            app.sign_in("WRD-ERD-042", "password")
+            assert fake["officer"], "the officer was refused too"
+        finally:
+            _st.session_state = saved
+        return "farmer refused with a reason, officer admitted"
+
+    check("the gate refuses a typed farmer id", _farmer_gate_refuses)
+
+
+    def _secretary_scope():
+        """A WUA secretary runs their own command area and no other."""
+        at = _render(user=SECRETARY)
+        assert not at.exception
+        assert at.session_state["source_id"] == SECRETARY["source_id"], (
+            f"a secretary for {SECRETARY['source_id']} opened on "
+            f"{at.session_state['source_id']}")
+        return f"locked to {SECRETARY['source_id']}"
+
+    check("secretary is scoped to their command area", _secretary_scope)
+
+
+    def _officer_scope():
+        """A district officer supervises every WUA in the district — an
+        officer who could only see one could not do the job the approval
+        column exists for."""
+        at = _render(user=OFFICER)
+        assert not at.exception
+        assert _signed_in(at), "the officer session did not reach the page"
+        return "officer session renders with the full toolset"
+
+    check("officer reaches the full dashboard", _officer_scope)
+
+
+    def _signed_in_roles_render():
+        """Every role the gate admits must render without an exception."""
+        for user in (OFFICER, SECRETARY):
+            at = _render(user=user)
+            assert not at.exception, \
+                f"{user['role']} session raised {at.exception[0].value}"
+        return "officer and secretary, no exceptions"
+
+    check("every role the gate admits renders", _signed_in_roles_render)
+
+
+    def _secretary_cannot_approve():
+        """The approval is the officer's signature. A secretary who
+        could give it would make the column meaningless."""
+        at = _render(user=SECRETARY)
+        approve = [b for b in at.button if b.label.startswith("Approve")]
+        assert approve, "the Approve control is missing entirely"
+        assert all(b.disabled for b in approve), \
+            "a secretary can approve their own allocation"
+        return "Approve present but disabled for a secretary"
+
+    check("only an officer may approve", _secretary_cannot_approve)
+
+
+    def _record_grows_from_the_app():
+        """Using the dashboard must actually write to the record.
+
+        The whole point of db.py is that a decision outlives the screen.
+        If app.py never calls save_run, every check in section 8b is
+        testing a module nothing uses."""
+        before = len(db.recent_runs("C01", limit=200))
+        at = _render(user=OFFICER)
+        assert not at.exception
+        at.session_state["source_id"] = "C01"
+        at.session_state["w_ETo"] = 6.35      # a reading nothing else used
+        at.run()
+        after = len(db.recent_runs("C01", limit=200))
+        assert after > before, (
+            "the dashboard rendered an allocation but recorded nothing — "
+            "app.py is not calling db.save_run()")
+        return f"C01 log grew {before} -> {after}"
+
+    check("the dashboard writes to the record",
+          _record_grows_from_the_app)
 
 
 if not FULL and AppTest is not None:

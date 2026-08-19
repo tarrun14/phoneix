@@ -17,7 +17,7 @@ changes shape, one function changes and the layout does not move.
         +-- render_condition_badge(...)
         +-- render_farm_cards(claims, allocation, limit)
         +-- render_activity_log(log)
-        +-- render_impact(scorecard)
+        +-- render_impact(out)
         +-- render_agent_trace(out, source)   the "show me it isn't
                                               hardcoded" panel
 
@@ -31,6 +31,17 @@ Farms belong to a tank or canal and never compete across them. Tank A's
 water does not reach Tank B's farms, and no Water User Association has
 the authority to move it. `served` in main() is filtered BEFORE
 compute() is called, so the engine is never even shown the other farms.
+
+WHO MAY SIGN IN
+Officers and WUA secretaries. Farmer accounts exist on the roster —
+db.py seeds two — but the gate refuses them and the login screen does
+not offer them. A farmer's own allocation is a different product for a
+different audience, and a screen that offers a role the gate then
+rejects is worse than one that never offered it.
+
+The farmer BRANCHES below are kept and still work. Enable the role by
+removing the check in sign_in() and widening the roster filter in
+main(); nothing else has to change.
 """
 
 from datetime import datetime
@@ -55,6 +66,10 @@ from sources import (list_sources, get_source, deliverable_water_L,
 import db
 from db import (ROLE_FARMER, ROLE_OFFICER, ROLE_SECRETARY,
                 ROLE_LABEL)
+
+# Who the gate lets through. Farmers are on the roster and refused —
+# see the module docstring.
+SIGN_IN_ROLES = (ROLE_OFFICER, ROLE_SECRETARY)
 
 # ══════════════════════════════════════════════════════════════════
 # Palette — petrol blue for water, ochre for scarcity, clay for loss
@@ -875,12 +890,21 @@ def impact_rows(sc, name_farms=True):
     has_small = aq["has_smallholders"]
 
     def _stranded_fmt(cp_dict):
+        """Under head-to-tail, WHICH farms got nothing is the argument.
+
+        A bare count says a policy abandoned someone; the ids and their
+        distances say it abandoned the far end of the channel, which is
+        the whole finding. Falls back to the count when the scorecard
+        does not carry the detail."""
         v = cp_dict["farms_with_nothing"]
         sf = cp_dict.get("stranded_farms", [])
         if not sf:
             return f"{v:,.0f}"
-        details = ", ".join(f"{f['farm_id']} at {f['distance']}m" for f in sf)
-        return f"{v:,.0f}<br><span style='font-size:11px;font-weight:normal;line-height:1.2;display:inline-block;margin-top:2px;'>{details}</span>"
+        details = ", ".join(f"{f['farm_id']} at {f['distance']}m"
+                            for f in sf)
+        return (f"{v:,.0f}<br><span style='font-size:11px;"
+                f"font-weight:normal;line-height:1.2;"
+                f"display:inline-block;margin-top:2px;'>{details}</span>")
 
     return [
         {"label": "Total food produced",
@@ -1043,10 +1067,11 @@ def render_impact(out, workings=True):
     That naming is why `workings` exists. The table and the headline are
     area-wide totals and name nobody; the worked examples under them
     quote the biggest farm, the largest farm and a farm that lost its
-    crop, by id. On a farmer's screen those are three other people's
-    allocations, so the expander comes off rather than being rewritten
-    around their own farm — an example that called their plot "the
-    largest farm" would be a worse answer than no example."""
+    crop, by id. On a screen whose reader is entitled to their own
+    allocation and not to anyone else's, the expander comes off rather
+    than being rewritten around their own farm — an example that called
+    their plot "the largest farm" would be a worse answer than no
+    example."""
     sc = out["scorecard"]
     infeasible = out["coordination"].get("supply_infeasible", False)
 
@@ -1071,8 +1096,8 @@ def render_impact(out, workings=True):
 
     body = ""
     # Same audience decision as the workings expander: a screen that
-    # does not get the worked examples does not get the farm id in
-    # the largest-farm row either.
+    # does not get the worked examples does not get the farm id in the
+    # largest-farm row either.
     for r in impact_rows(sc, name_farms=workings):
         if r.get("compare", True):
             diff, ahead = _difference(r["cp"], r["aq"], r["kind"],
@@ -1088,7 +1113,8 @@ def render_impact(out, workings=True):
             f"<div style='color:{GREY};font-size:{T_SMALL};"
             f"line-height:1.4;margin-top:2px;'>{r['note']}</div></td>"
             f"<td style='text-align:right;padding:{pad} 6px;color:{GREY};"
-            f"white-space:nowrap;{big}'>{r.get('cp_str') if 'cp_str' in r else r['fmt'](r['cp'])}</td>"
+            f"white-space:nowrap;{big}'>"
+            f"{r.get('cp_str') if 'cp_str' in r else r['fmt'](r['cp'])}</td>"
             f"<td style='text-align:right;padding:{pad} 6px;color:{GREY};"
             f"white-space:nowrap;{big}'>{r['fmt'](r['ym'])}</td>"
             f"<td style='text-align:right;padding:{pad} 10px;color:{INK};"
@@ -1721,16 +1747,26 @@ def sign_in(officer_id, password=""):
 
     ⚠ Must be a callback. It writes st.session_state.source_id, and
     Streamlit refuses that once the selectbox bound to that key has been
-    instantiated in the same run — callbacks run before the next one."""
+    instantiated in the same run — callbacks run before the next one.
+
+    ⚠ FARMERS ARE REFUSED. The rows exist on the roster and the farmer
+    branches through this file still work; the gate is what is closed.
+    A farmer's own allocation is a different product for a different
+    audience, and half-opening it here would mean a screen that offers a
+    role and then argues with itself about what that role may see.
+    Remove this check and widen SIGN_IN_ROLES to enable it."""
     ss = st.session_state
     officer = db.verify_officer(officer_id, password)
     if officer is None:
         typed = (officer_id or "").strip()
-        ss.login_error = (f"Invalid ID or password."
+        ss.login_error = ("Invalid ID or password."
                           if typed else "Enter an ID and password to sign in.")
         return
-    if officer["role"] in (ROLE_FARMER, ROLE_SECRETARY):
-        ss.login_error = "Only officers are allowed to sign in."
+    if officer["role"] not in SIGN_IN_ROLES:
+        ss.login_error = (
+            "Farmer accounts are not enabled on this prototype. A farmer "
+            "is shown their allocation by their WUA, not through this "
+            "screen.")
         return
 
     ss.officer = officer
@@ -1743,9 +1779,9 @@ def sign_in(officer_id, password=""):
     ss.w_ETo = float(ss.readings["ETo"])
     ss.w_rainfall_mm = float(ss.readings["rainfall_mm"])
     ss.w_tank_liters = float(ss.readings["tank_liters"])
-    # A secretary is constituted for one command area and a farmer farms
-    # in one, so signing in IS choosing the area. The district officer
-    # can move afterwards; the other two cannot.
+    # A secretary is constituted for one command area, so signing in IS
+    # choosing the area. The district officer can move afterwards; the
+    # secretary cannot.
     if officer["source_id"] in list_sources():
         ss.source_id = officer["source_id"]
         ss.w_tank_liters = float(deliverable_water_L(ss.source_id))
@@ -1753,7 +1789,8 @@ def sign_in(officer_id, password=""):
 
 
 def sign_in_typed():
-    sign_in(st.session_state.get("login_id", ""), st.session_state.get("login_password", ""))
+    sign_in(st.session_state.get("login_id", ""),
+            st.session_state.get("login_password", ""))
 
 
 def sign_out():
@@ -1775,9 +1812,15 @@ def close_run():
 def render_login(roster, error=None):
     """The gate, and the disclaimer that has to sit on it.
 
-    There is no password box. Putting one there would imply a check that
-    does not happen, and a judge who typed anything into it would learn
-    the wrong thing about what this prototype is."""
+    ⚠ The password box is real but the check behind it is not: db.py
+    compares against a plaintext column and every seeded account shares
+    one password. It is a login screen standing in for the WUA
+    office-bearer register, not a security control. The roster printed
+    below says so by existing — a deployment would not print it.
+
+    `roster` is filtered by the caller, not here. A render function that
+    decided who may sign in would be a second gate in a different file
+    from the first one."""
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
         section("Sign in")
@@ -1794,15 +1837,13 @@ def render_login(roster, error=None):
         st.markdown(
             f"<div style='font-size:{T_SMALL};color:{GREY};"
             f"margin:18px 0 8px 0;'>Registered on this prototype — "
-            f"the roster a deployment would not print:</div>",
+            f"the roster a deployment would not print. Every account "
+            f"below uses the password <b>password</b>:</div>",
             unsafe_allow_html=True)
         for o in roster:
-            scope = (f"farm {o['farm_id']} &middot; "
-                     f"{get_source(o['source_id'])['name']}"
-                     if o["role"] == ROLE_FARMER else
-                     ("every command area in the district"
-                      if o["role"] == ROLE_OFFICER
-                      else get_source(o["source_id"])["name"]))
+            scope = ("every command area in the district"
+                     if o["role"] == ROLE_OFFICER
+                     else get_source(o["source_id"])["name"])
             st.button(f"{o['officer_id']}  —  {o['name']}, "
                       f"{ROLE_LABEL[o['role']]}",
                       key=f"login_{o['officer_id']}", width='stretch',
@@ -2134,10 +2175,10 @@ def note_condition_change(label, eto, rainfall_mm, shortfall):
     return {
         "time": datetime.now().strftime("%H:%M:%S"),
         "agent": "Weather",
-        "message": (f"Conditions reclassified: {was} → {label} "
-                    f"(ETo {was_eto:.1f}→{eto:.1f}, "
-                    f"rain {was_rain:.0f}→{rainfall_mm:.0f}mm, "
-                    f"shortfall {was_short:.0f}→{shortfall:.0f}%)"),
+        "message": (f"Conditions reclassified: {was} \u2192 {label} "
+                    f"(ETo {was_eto:.1f}\u2192{eto:.1f}, "
+                    f"rain {was_rain:.0f}\u2192{rainfall_mm:.0f}mm, "
+                    f"shortfall {was_short:.0f}\u2192{shortfall:.0f}%)"),
     }
 
 
@@ -2167,11 +2208,10 @@ def next_farm_id():
 def render_readings_readonly(eto, rainfall_mm, tank_L):
     """The three readings, shown rather than offered.
 
-    A farmer is not given the boxes. The numbers that decide their
-    allocation are a WUA and WRD matter, and a farmer arguing with the
-    gauge in their own sidebar would be a different application. What
-    they are owed is sight of the same three figures the secretary
-    typed, which is what this is."""
+    Used by any screen that is entitled to see the numbers behind an
+    allocation but not to set them. The figures that decide an
+    allocation are a WUA and WRD matter; sight of them is owed to
+    everyone the allocation touches."""
     # Stacked, not tabled. detail_table() is three columns wide and the
     # sidebar is not: the notes column ran off the edge of it, one word
     # per line.
@@ -2185,13 +2225,13 @@ def render_readings_readonly(eto, rainfall_mm, tank_L):
          "deliverable water, after channel losses"),
     ]
     st.markdown(
-        f"<div style='border-left:2px solid {LINE};padding-left:10px;"
-        f"margin:2px 0 10px 0;'>" + "".join(
-            f"<div style='margin-bottom:9px;'>"
-            f"<div style='font-size:{T_SMALL};color:{GREY};'>{label}</div>"
-            f"<div style='font-size:{T_BODY};font-weight:600;color:{INK};'>"
+        f"<div style=\'border-left:2px solid {LINE};padding-left:10px;"
+        f"margin:2px 0 10px 0;\'>" + "".join(
+            f"<div style=\'margin-bottom:9px;\'>"
+            f"<div style=\'font-size:{T_SMALL};color:{GREY};\'>{label}</div>"
+            f"<div style=\'font-size:{T_BODY};font-weight:600;color:{INK};\'>"
             f"{value}</div>"
-            f"<div style='font-size:{T_SMALL};color:{GREY};line-height:1.5;'>"
+            f"<div style=\'font-size:{T_SMALL};color:{GREY};line-height:1.5;\'>"
             f"{note}</div></div>" for label, value, note in rows)
         + "</div>", unsafe_allow_html=True)
     st.caption("Entered by the WUA secretary for this command area.")
@@ -2200,8 +2240,8 @@ def render_readings_readonly(eto, rainfall_mm, tank_L):
 def approve(run_id, officer_id):
     """Sign a run off, and say what happened either way.
 
-    The refusal path is not an error state to hide: 'this run is already
-    approved' is the schema protecting a signature, and the person who
+    The refusal path is not an error state to hide: \'this run is already
+    approved\' is the schema protecting a signature, and the person who
     just clicked has a right to know whose it is."""
     try:
         db.approve_run(run_id, officer_id)
@@ -2238,7 +2278,14 @@ def main():
     # Everything past this point decides somebody's water. There is no
     # anonymous view of it.
     if ss.officer is None:
-        render_login(db.list_officers(), ss.login_error)
+        # Officers and secretaries only — SIGN_IN_ROLES. The roster is
+        # filtered HERE rather than in render_login(), so the list on
+        # screen and the check in sign_in() read the same constant. A
+        # login screen that offers a role the gate then refuses is worse
+        # than one that never offered it.
+        roster = [o for o in db.list_officers()
+                  if o["role"] in SIGN_IN_ROLES]
+        render_login(roster, ss.login_error)
         return
 
     officer = ss.officer
@@ -2414,9 +2461,9 @@ def main():
                                          f"Everything below recomputed.")
                         st.rerun()
 
-    # The readings this run works from. A farmer's sidebar has no boxes,
-    # so theirs come from the record of what the secretary entered; for
-    # everyone else the boxes are the truth and are mirrored back.
+    # The readings this run works from. A screen without the boxes takes
+    # its numbers from ss.readings; for everyone else the boxes are the
+    # truth and are mirrored back into it.
     if is_farmer:
         readings = dict(ss.readings)
     else:
@@ -2453,11 +2500,11 @@ def main():
         if detail is None:
             st.error(f"Run #{ss.viewing_run} is not on the record.")
             return
-        # The same limit as the sidebar: a secretary and a farmer are
-        # tied to one command area, and that has to hold for the record
-        # as well as for the live page. A run id is a guessable integer,
-        # and an audit trail readable by anyone who can type one is not
-        # a boundary at all.
+        # The same limit as the sidebar: a secretary is tied to one
+        # command area, and that has to hold for the record as well as
+        # for the live page. A run id is a guessable integer, and an
+        # audit trail readable by anyone who can type one is not a
+        # boundary at all.
         if not can_switch_area and detail["run"]["source_id"] != \
                 officer["source_id"]:
             st.error(f"Run #{ss.viewing_run} belongs to another command "
@@ -2498,8 +2545,7 @@ def main():
     # row — a log with four hundred identical entries is the same as no
     # log at all.
     #
-    # A farmer's visit is not a decision and does not create one. Their
-    # page reads the record; it does not write to it.
+    # A read-only visit is not a decision and does not create one.
     if not is_farmer:
         ss.run_id = record_run(out, source, ss.source_id, ss.mode)
     render_top_bar(out, source)
@@ -2600,7 +2646,7 @@ def main():
 
         # The agent log names other farms and their outcomes, and the
         # working table is every farm on one sheet. Neither belongs on a
-        # farmer's screen.
+        # screen limited to one farm.
         if is_farmer:
             return
 
