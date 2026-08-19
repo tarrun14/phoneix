@@ -13,6 +13,7 @@ we have no access to real district records. The maths that consumes this
 output (farm_agent.py, optimizer.py, impact.py) is real.
 """
 
+import math
 import random
 
 from constants import KC, STAGES, TYPICAL_YIELD_KG_PER_M2, M2_PER_ACRE
@@ -53,6 +54,33 @@ SIZE_BANDS = [
 # invisible in the demo. Seed it here, not by hand-editing claims.
 FAIRNESS_DEBT_SHARE = 0.25
 FAIRNESS_DEBT_RANGE = (0.4, 1.8)
+
+
+# ── Position along the channel ─────────────────────────────
+# Every farm sits somewhere between the sluice and the tail. Under a
+# working allocation that is a detail; under CURRENT PRACTICE it decides
+# who eats, because the channel is filled from the head and whoever is
+# past the point where it runs dry gets nothing.
+#
+# sources.py records command area, not channel geometry, so the run is
+# derived: a block of A hectares is about sqrt(A x 10,000) m across, and
+# a distributary runs roughly twice that end to end. Fabricated, like
+# the rest of this file, but derived from a real recorded figure rather
+# than typed in per farm.
+def _channel_length_m(source_id):
+    """How far the channel runs from head to tail, in metres."""
+    ha = get_source(source_id)["command_area_ha"]
+    return round(math.sqrt(ha * 10_000) * 2)
+
+
+def _distance_rng(source_id):
+    """A private, stable RNG per source.
+
+    Seeded by the source id so a farm's position never moves between
+    reruns. A distance that changed on every rerun would reshuffle who
+    the tail-enders are, and the Impact panel would report a different
+    number of ruined farms every time the page redrew."""
+    return random.Random(f"channel-{source_id}")
 
 
 def _draw_area(rng):
@@ -148,6 +176,10 @@ def generate_farms(n, seed=None, source_id=None):
             "expected_yield_kg": expected_yield_kg,
             "is_smallholder": area_m2 < SMALLHOLDER_AREA_M2,
             "fairness_debt": fairness_debt,
+            # Somewhere along its own channel. Drawn from this run's rng
+            # so a seeded generate_farms() is reproducible.
+            "distance_from_head_m": round(
+                rng.uniform(5, _channel_length_m(src))),
         })
 
     return farms
@@ -222,6 +254,23 @@ _DEMO_SPEC = [
 
 def demo_farms(source_id=None):
     """The fixed demo farms. Pass a source_id for just that command area."""
+    # Farms are laid out along their own source's channel in the order
+    # they are listed above, spaced evenly and then nudged, so the
+    # head-to-tail sequence is stable and readable while the metres
+    # themselves are not a suspiciously round ruler.
+    per_source = {}
+    for row in _DEMO_SPEC:
+        per_source.setdefault(row[0], []).append(row[1])
+
+    distance = {}
+    for sid, fids in per_source.items():
+        run = _channel_length_m(sid)
+        rng = _distance_rng(sid)
+        step = run / (len(fids) + 1)
+        for i, fid in enumerate(fids, start=1):
+            jitter = rng.uniform(-0.3, 0.3) * step
+            distance[fid] = max(5, round(i * step + jitter))
+
     out = [
         {
             "farm_id": fid,
@@ -234,6 +283,8 @@ def demo_farms(source_id=None):
             "expected_yield_kg": round(area * TYPICAL_YIELD_KG_PER_M2[crop]),
             "is_smallholder": area < SMALLHOLDER_AREA_M2,
             "fairness_debt": debt,
+            # Metres from the sluice. Read by impact.head_to_tail_split.
+            "distance_from_head_m": distance[fid],
         }
         for src, fid, name, crop, stage, area, debt in _DEMO_SPEC
     ]

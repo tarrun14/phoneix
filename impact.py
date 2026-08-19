@@ -32,7 +32,9 @@ Yield math:
 from farm_agent import build_claims
 from coordinator import run_coordination
 from optimizer import allocate, POLICY_MODES
-from constants import WEATHER_STATES, REFERENCE_FARM_COUNT
+from constants import (COMPENSATION_PER_ACRE_RUPEES, M2_PER_ACRE,
+                       MARKET_PRICE_PER_KG, REFERENCE_FARM_COUNT,
+                       WEATHER_STATES)
 
 
 def _loss_fraction(ky, allocated_L, required_L):
@@ -133,6 +135,48 @@ def naive_equal_split(claims, total_water_L):
     return {fid: int(v) for fid, v in given.items()}
 
 
+def head_to_tail_split(claims, total_water_L):
+    """CURRENT PRACTICE — what happens when there is no method.
+
+    The channel is filled from the sluice. Each farm in turn takes its
+    whole requirement, and the water stops where it stops. No survival
+    floor, no priority, no negotiation: the only input is where a farm
+    happens to sit.
+
+    This is the baseline that matters for deployment. Under the Lower
+    Bhavani Project, when storage fell short and the fifth wetting was
+    cancelled, there was no systematic allocation — farmers went to the
+    RDO and then to court over who got priority. Head-to-tail is the
+    honest model of that, and it is the thing AquaFair has to beat.
+
+    Same signature and same return shape as naive_equal_split, so every
+    metric in _summarise() computes for it without a special case.
+
+    The farm the water runs out inside gets the remainder rather than
+    nothing: a channel that empties mid-field does not stop at a
+    property line. Farms with no recorded position sort to the tail,
+    because an unknown position is not a claim to be served first.
+    """
+    if not claims:
+        return {}
+
+    given = {c["farm_id"]: 0 for c in claims}
+    pool = float(total_water_L)
+
+    def position(c):
+        d = c.get("distance_from_head_m")
+        return (float("inf") if d is None else float(d), c["farm_id"])
+
+    for c in sorted(claims, key=position):
+        if pool <= 0:
+            break
+        take = min(float(c["water_required_L"]), pool)
+        given[c["farm_id"]] = int(take)
+        pool -= take
+
+    return given
+
+
 def _summarise(claims, given_by_id):
     """Turn {farm_id: litres} into the metrics the Impact panel shows."""
     total_yield = 0
@@ -143,13 +187,33 @@ def _summarise(claims, given_by_id):
     smallholder_potential = 0
     crops_lost = 0
     survival_met = 0
+    got_nothing = 0
+    value_rupees = 0
+    potential_value_rupees = 0
+    compensation_rupees = 0
+    lost_farm_ids = []
 
     for c in claims:
         got = given_by_id.get(c["farm_id"], 0)
         realised = compute_actual_yield(c, got)
 
+        # Not "short" — nothing at all. Under head-to-tail these are the
+        # tail-end farms the channel never reached; under yield_max they
+        # are whatever ranked below the cut. Either way it is the
+        # sharpest single count of who a policy abandons.
+        if got <= 0:
+            got_nothing += 1
+
         total_yield += realised
         potential_yield += c["expected_yield_kg"]
+
+        # What the harvest is worth at the counter. Priced per crop,
+        # because a kilogram of groundnut and a kilogram of cane are not
+        # the same money — and a policy that protects tonnage is not
+        # automatically the policy that protects income.
+        value_rupees += realised * MARKET_PRICE_PER_KG[c["crop"]]
+        potential_value_rupees += (c["expected_yield_kg"]
+                                   * MARKET_PRICE_PER_KG[c["crop"]])
 
         # Raw tonnage is a poor headline where sugarcane is grown: at
         # 7 kg/m2 against ragi's 0.25, cane is 28x heavier per hectare
@@ -171,6 +235,11 @@ def _summarise(claims, given_by_id):
         # it is the "crops lost entirely" number on the Impact slide.
         if got < c["survival_minimum_L"]:
             crops_lost += 1
+            lost_farm_ids.append(c["farm_id"])
+            # A crop lost outright is a compensation claim waiting to be
+            # filed. Same test as crops_lost, costed.
+            compensation_rupees += ((c["area_m2"] / M2_PER_ACRE)
+                                    * COMPENSATION_PER_ACRE_RUPEES)
         else:
             survival_met += 1
 
@@ -181,6 +250,19 @@ def _summarise(claims, given_by_id):
     # harvest kept" — there is nothing to keep. Showing 0% reads as a
     # catastrophic failure when it is an empty set.
     has_smallholders = smallholder_potential > 0
+
+    # The biggest farm in the command area, by area. It is the one a
+    # yield-maximising policy protects first and an equity policy asks
+    # to give ground, so showing what it kept is the fair way to admit
+    # what AquaFair costs the largest holder rather than only what it
+    # wins the smallest.
+    largest = max(claims, key=lambda c: c["area_m2"]) if claims else None
+    if largest is not None:
+        largest_kept = compute_actual_yield(
+            largest, given_by_id.get(largest["farm_id"], 0))
+        largest_kept_pct = pct(largest_kept, largest["expected_yield_kg"])
+    else:
+        largest_kept_pct = 0.0
 
     return {
         "total_yield_kg":            total_yield,
@@ -196,6 +278,17 @@ def _summarise(claims, given_by_id):
         "smallholder_kept_pct":      pct(smallholder_yield, smallholder_potential),
         "has_smallholders":          has_smallholders,
         "water_used_L":              sum(given_by_id.values()),
+        # Same test as crops_lost, named for the row that counts farms
+        # rather than crops. One farm grows one crop here, so the two
+        # numbers are equal by construction — see the Impact panel note.
+        "farms_below_survival":      crops_lost,
+        "farms_with_nothing":        got_nothing,
+        "lost_farm_ids":             lost_farm_ids,
+        "value_rupees":              int(round(value_rupees)),
+        "potential_value_rupees":    int(round(potential_value_rupees)),
+        "compensation_rupees":       int(round(compensation_rupees)),
+        "largest_farm_id":           largest["farm_id"] if largest else None,
+        "largest_farm_kept_pct":     largest_kept_pct,
     }
 
 
@@ -213,7 +306,12 @@ def build_scorecard(claims, total_water_L, smart_allocation=None):
                      re-running the contest loop and drifting.
 
     Returns {"equity": {...}, "yield_max": {...}, "emergency": {...},
-             "naive": {...}, "headline": {...}}
+             "naive": {...}, "current": {...}, "headline": {...}}
+
+    "current" is head-to-tail, the status quo. It is deliberately NOT a
+    policy mode in optimizer.py: nobody should be able to select it as
+    an allocation to run, and the coordinator has nothing to negotiate
+    over a rule that only reads a map.
     """
     out = {}
 
@@ -226,6 +324,8 @@ def build_scorecard(claims, total_water_L, smart_allocation=None):
         out[mode] = _summarise(claims, given)
 
     out["naive"] = _summarise(claims, naive_equal_split(claims, total_water_L))
+    out["current"] = _summarise(
+        claims, head_to_tail_split(claims, total_water_L))
 
     # The four numbers on the money slide. AquaFair (equity) vs the
     # pure-efficiency baseline.

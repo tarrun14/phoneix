@@ -373,6 +373,20 @@ MARKET_PRICE_PER_KG = {
 
 
 # ═════════════════════════════════════════════════════════════════
+# Crop-failure compensation — [ASSUMED], a real petitioned figure
+# ═════════════════════════════════════════════════════════════════
+# Rupees per acre for a crop lost outright. This is the per-acre figure
+# LBP farmers petitioned for — it is what a failed season is claimed to
+# be worth by the people who farm it, not a market price we derived.
+#
+# It is used one way only: a policy that loses a crop would owe this,
+# and a policy that saves the same crop does not. The Impact panel
+# shows both liabilities and calls the gap "compensation avoided".
+# Do not treat it as revenue — it is a cost that was not incurred.
+COMPENSATION_PER_ACRE_RUPEES = 30_000
+
+
+# ═════════════════════════════════════════════════════════════════
 # Weather / scenario presets — [ASSUMED], tuned for the demo
 # ═════════════════════════════════════════════════════════════════
 # tank_liters is calibrated for REFERENCE_FARM_COUNT farms. Scale it
