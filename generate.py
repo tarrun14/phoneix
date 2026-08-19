@@ -56,17 +56,18 @@ FAIRNESS_DEBT_SHARE = 0.25
 FAIRNESS_DEBT_RANGE = (0.4, 1.8)
 
 
-# ── Position along the channel ─────────────────────────────
+# ── Position along the channel ───────────────────────────────────
 # Every farm sits somewhere between the sluice and the tail. Under a
 # working allocation that is a detail; under CURRENT PRACTICE it decides
 # who eats, because the channel is filled from the head and whoever is
 # past the point where it runs dry gets nothing.
 #
 # sources.py records command area, not channel geometry, so the run is
-# derived: a block of A hectares is about sqrt(A x 10,000) m across, and
-# a distributary runs roughly twice that end to end. Fabricated, like
-# the rest of this file, but derived from a real recorded figure rather
-# than typed in per farm.
+# DERIVED rather than typed: a block of A hectares is about
+# sqrt(A x 10,000) m across, and a distributary runs roughly twice that
+# end to end. Fabricated like the rest of this file, but derived from a
+# real recorded figure — so editing a command area in the database moves
+# the channel with it instead of leaving a hardcoded span behind.
 def _channel_length_m(source_id):
     """How far the channel runs from head to tail, in metres."""
     ha = get_source(source_id)["command_area_ha"]
@@ -130,6 +131,17 @@ def generate_farms(n, seed=None, source_id=None):
     total_w = sum(weights)
     farms = []
 
+    # ⚠ EVERY SOURCE GETS AT LEAST ONE FARM.
+    # Weighting by command area is right — a 72 ha canal should carry
+    # more farms than a 4 ha village tank — but T01 is 3% of the
+    # district, so a 100-farm draw can legitimately give it zero. The
+    # dashboard then shows "no farms registered under Periya Eri" and
+    # nothing else, which on stage looks exactly like a broken Load 100
+    # button. Seed one farm per source first, then weight the rest.
+    seeded = list(sources) if source_id is None else []
+    if len(seeded) > n:
+        seeded = seeded[:n]
+
     for i in range(1, n + 1):
         crop = rng.choice(crops)
         stage = rng.choice(STAGES)
@@ -156,6 +168,9 @@ def generate_farms(n, seed=None, source_id=None):
 
         if source_id is not None:
             src = source_id
+        elif seeded:
+            # One each, in order, before anything is weighted.
+            src = seeded.pop(0)
         else:
             r, acc = rng.random() * total_w, 0.0
             src = sources[-1]
@@ -177,7 +192,7 @@ def generate_farms(n, seed=None, source_id=None):
             "is_smallholder": area_m2 < SMALLHOLDER_AREA_M2,
             "fairness_debt": fairness_debt,
             # Somewhere along its own channel. Drawn from this run's rng
-            # so a seeded generate_farms() is reproducible.
+            # so a seeded generate_farms() stays reproducible.
             "distance_from_head_m": round(
                 rng.uniform(5, _channel_length_m(src))),
         })
@@ -216,6 +231,7 @@ _DEMO_SPEC = [
     ("T01", "F003", "Rajesh",      "ragi",      "development",  5_000, 0.0),
     ("T01", "F004", "Lakshmi",     "paddy",     "mid",         12_000, 0.0),
 
+<<<<<<< Updated upstream
     # ── T02 Kanmoi Chinna Eri — small tank, marginal holdings ──
     ("T02", "F005", "Selvam",      "groundnut", "mid",         14_000, 0.0),
     ("T02", "F006", "Bhavani",     "ragi",      "initial",      9_500, 0.8),
@@ -224,6 +240,14 @@ _DEMO_SPEC = [
     ("T02", "F009", "Velu",        "sorghum",   "mid",         16_500, 0.0),
     ("T02", "F010", "Shanthi",     "bean",      "development", 12_000, 0.0),
     ("T02", "F011", "Ganesan",     "paddy",     "initial",     19_000, 0.4),
+=======
+# ⚠ distance_from_head_m is NOT here. It is computed in demo_farms()
+# from the source's command area, so a channel position cannot drift
+# from the tank record it is derived from — the same reason
+# expected_yield_kg is not in the CSV either.
+DEMO_CSV_FIELDS = ["source_id", "farm_id", "farmer_name", "crop",
+                   "stage", "area_m2", "fairness_debt"]
+>>>>>>> Stashed changes
 
     # ── C01 Kalingarayan Branch Canal — larger holdings ──
     ("C01", "F012", "Perumal",     "sugarcane", "mid",         82_000, 0.0),
@@ -253,11 +277,26 @@ _DEMO_SPEC = [
 
 
 def demo_farms(source_id=None):
+<<<<<<< Updated upstream
     """The fixed demo farms. Pass a source_id for just that command area."""
     # Farms are laid out along their own source's channel in the order
     # they are listed above, spaced evenly and then nudged, so the
     # head-to-tail sequence is stable and readable while the metres
     # themselves are not a suspiciously round ruler.
+=======
+    """The fixed demo farms. Pass a source_id for just that command area.
+
+    Inputs come from demo_farms.csv; expected_yield_kg, is_smallholder
+    and distance_from_head_m are derived here so they can never drift
+    from constants.py or from the tank record.
+
+    Farms are laid out along their own source's channel in the order
+    they are listed in the CSV, spaced evenly and then nudged, so the
+    head-to-tail sequence is stable and readable while the metres
+    themselves are not a suspiciously round ruler."""
+    spec = load_demo_spec()
+
+>>>>>>> Stashed changes
     per_source = {}
     for row in _DEMO_SPEC:
         per_source.setdefault(row[0], []).append(row[1])
@@ -280,11 +319,20 @@ def demo_farms(source_id=None):
             "stage": stage,
             "area_m2": area,
             "soil_moisture_pct": 35.0,
+<<<<<<< Updated upstream
             "expected_yield_kg": round(area * TYPICAL_YIELD_KG_PER_M2[crop]),
             "is_smallholder": area < SMALLHOLDER_AREA_M2,
             "fairness_debt": debt,
             # Metres from the sluice. Read by impact.head_to_tail_split.
             "distance_from_head_m": distance[fid],
+=======
+            "expected_yield_kg": round(
+                r["area_m2"] * TYPICAL_YIELD_KG_PER_M2[r["crop"]]),
+            "is_smallholder": r["area_m2"] < SMALLHOLDER_AREA_M2,
+            "fairness_debt": r["fairness_debt"],
+            # Metres from the sluice. Read by head_to_tail_split().
+            "distance_from_head_m": distance[r["farm_id"]],
+>>>>>>> Stashed changes
         }
         for src, fid, name, crop, stage, area, debt in _DEMO_SPEC
     ]

@@ -373,20 +373,6 @@ MARKET_PRICE_PER_KG = {
 
 
 # ═════════════════════════════════════════════════════════════════
-# Crop-failure compensation — [ASSUMED], a real petitioned figure
-# ═════════════════════════════════════════════════════════════════
-# Rupees per acre for a crop lost outright. This is the per-acre figure
-# LBP farmers petitioned for — it is what a failed season is claimed to
-# be worth by the people who farm it, not a market price we derived.
-#
-# It is used one way only: a policy that loses a crop would owe this,
-# and a policy that saves the same crop does not. The Impact panel
-# shows both liabilities and calls the gap "compensation avoided".
-# Do not treat it as revenue — it is a cost that was not incurred.
-COMPENSATION_PER_ACRE_RUPEES = 30_000
-
-
-# ═════════════════════════════════════════════════════════════════
 # Weather / scenario presets — [ASSUMED], tuned for the demo
 # ═════════════════════════════════════════════════════════════════
 # tank_liters is calibrated for REFERENCE_FARM_COUNT farms. Scale it
@@ -448,6 +434,34 @@ WEATHER_STATES = {
 # better beats. Opening on drought means pressing Normal first to get it
 # back. Set this to "normal" if you would rather keep that transition.
 DEFAULT_WEATHER = "drought"
+
+
+# ═════════════════════════════════════════════════════════════════
+# Crop-failure compensation — [FAO? no. GOVERNMENT NORM.]
+# ═════════════════════════════════════════════════════════════════
+# What the state owes a farmer whose crop fails outright, per acre.
+# impact.py costs every farm below its survival minimum at this rate,
+# so the Impact panel can show what each policy would have to pay.
+#
+# SOURCE: National Disaster Response Fund norms. Crop loss compensation
+# is Rs 17,000 per hectare for IRRIGATED land (Rs 8,500 rain-fed,
+# Rs 22,500 perennial). A canal or tank command area is irrigated by
+# definition, so 17,000/ha is the right cell.
+#
+#     Rs 17,000 / hectare  ->  Rs 17,000 / 2.471 acres  =  Rs 6,880/acre
+#
+# This is deliberately the CONSERVATIVE figure. Tamil Nadu crop
+# insurance pays up to Rs 26,000/acre for paddy, Rs 20,000 for millets
+# and Rs 12,000 for pulses, and farmer associations have reported state
+# drought relief around Rs 15,000/acre. Using the NDRF floor means the
+# compensation AquaFair avoids is understated rather than inflated —
+# if the number is wrong, it is wrong in the direction that weakens our
+# own case, which is the only safe direction for it to be wrong in.
+#
+# ⚠ NDRF also caps a claim at two hectares per farmer. We do not model
+# the cap, so the figure for a large holding is an upper bound on what
+# would actually be paid. Say so if the economics are questioned.
+COMPENSATION_PER_ACRE_RUPEES = 6_880
 
 
 # Tank and canal records live in sources.py, NOT here.

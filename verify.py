@@ -60,6 +60,98 @@ from farm_agent import build_claims                        # noqa: E402
 from impact import run_scenario                            # noqa: E402
 
 
+<<<<<<< Updated upstream
+=======
+# ═════════════════════════════════════════════════════════════════
+print("\n=== 1b. data files ===")
+# Two data files now live outside Python: the tank registry and the demo
+# farms. They are easy to forget in a commit, and the failure without
+# this section surfaces three checks later as something unrelated —
+# "CYCLE_DAYS and source volume are compatible" is a confusing first
+# thing to read when the real problem is a missing CSV.
+
+
+def _sources_db():
+    import db
+    loaded = S.load_sources(refresh=True)
+    assert loaded, "the sources table loaded but holds no records"
+    return f"{db.DB_PATH.name}: {len(loaded)} source(s)"
+
+
+check("SQLite registry loads and validates", _sources_db)
+
+
+def _json_seeds_db():
+    """The JSON is the editable source; the database must reflect it.
+
+    Two copies of the same four tanks that could disagree would be
+    worse than one — this asserts they cannot."""
+    import db
+    j = db.read_json()
+    d = S.load_sources(refresh=True)
+    assert set(j) == set(d), \
+        f"sources.json and the database hold different ids: {set(j) ^ set(d)}"
+    for sid in j:
+        for field in ("live_storage_L", "capacity_L",
+                      "conveyance_efficiency", "command_area_ha"):
+            assert j[sid][field] == d[sid][field], (
+                f"{sid}.{field}: sources.json says {j[sid][field]}, the "
+                f"database says {d[sid][field]} — run python db.py --rebuild")
+    return f"{db.JSON_PATH.name} and {db.DB_PATH.name} agree on {len(j)} source(s)"
+
+
+check("JSON source and database agree", _json_seeds_db)
+
+
+def _db_constraints():
+    """The CHECK constraints must actually be enforced.
+
+    A schema whose constraints were dropped in a rebuild would accept a
+    gauge reading above full supply level, and nothing downstream would
+    notice until an allocation looked wrong. Cheap to verify, rolled
+    back immediately."""
+    import sqlite3, db
+    con = db.connect()
+    try:
+        for sql, tag in [
+            ("UPDATE sources SET live_storage_L = 99000000 WHERE id='T01'",
+             "storage above capacity"),
+            ("UPDATE sources SET conveyance_efficiency = 1.5 WHERE id='T01'",
+             "efficiency above 1.0"),
+            ("INSERT INTO sources VALUES ('X01','B','river',1,1,0.5,1,'W')",
+             "type outside tank/canal"),
+        ]:
+            try:
+                con.execute(sql)
+                raise AssertionError(f"database accepted {tag}")
+            except sqlite3.IntegrityError:
+                pass
+    finally:
+        con.rollback()
+        con.close()
+    return "bad writes refused by the schema, not by Python"
+
+
+check("database constraints are enforced", _db_constraints)
+
+
+def _farms_file():
+    from generate import DEMO_FARMS_CSV, load_demo_spec
+    spec = load_demo_spec()
+    assert spec, "demo_farms.csv loaded but holds no rows"
+    known = {s for s in S.list_sources()}
+    orphans = sorted({r["source_id"] for r in spec} - known)
+    assert not orphans, (
+        f"{DEMO_FARMS_CSV.name} references source(s) not in the "
+        f"database: {orphans}")
+    return f"{DEMO_FARMS_CSV.name}: {len(spec)} farm(s)"
+
+
+check("demo_farms.csv loads and validates", _farms_file)
+
+
+# ═════════════════════════════════════════════════════════════════
+>>>>>>> Stashed changes
 print("\n=== 2. constants ===")
 
 
@@ -146,7 +238,7 @@ print("\n=== 4. farms ===")
 
 FARM_FIELDS = ["farm_id", "source_id", "farmer_name", "crop", "stage",
                "area_m2", "expected_yield_kg", "is_smallholder",
-               "fairness_debt"]
+               "fairness_debt", "distance_from_head_m"]
 
 
 def _farm_fields():
@@ -275,6 +367,7 @@ for _sid in S.list_sources():
         check(f"{_sid} / {_scen} (all 3 policies)", _combo)
 
 
+<<<<<<< Updated upstream
 def _money_slide():
     h = _run("T01", "drought", "equity")["scorecard"]["headline"]
     assert h["aquafair_crops_lost"] < h["yieldmax_crops_lost"], (
@@ -285,6 +378,95 @@ def _money_slide():
 
 
 check("T01 drought money slide points the right way", _money_slide)
+=======
+def _every_source_populated():
+    """Load 100 must never leave a command area empty.
+
+    T01 is 3% of the district by area, so a purely weighted draw can
+    legitimately give it zero farms — and the dashboard then shows "no
+    farms registered" and nothing else. On stage that looks exactly
+    like a broken Load 100 button."""
+    for seed in (42, 1, 7, 99):
+        farms = generate_farms(100, seed=seed)
+        empty = [s for s in S.list_sources()
+                 if not farms_for_source(farms, s)]
+        assert not empty, \
+            f"generate_farms(100, seed={seed}) left {empty} with no farms"
+    return "every source populated across 4 seeds"
+
+
+check("Load 100 populates every command area", _every_source_populated)
+
+
+def _head_to_tail_is_ordered():
+    """Current practice must actually serve head to tail.
+
+    Without a position on every claim the sort falls back to farm_id,
+    and the baseline stops being about the channel — it becomes an
+    arbitrary order dressed up as one. This asserts the water really
+    does run out down the line."""
+    from impact import head_to_tail_split
+    for sid in S.list_sources():
+        claims = build_claims(demo_farms(sid), C.WEATHER_STATES["drought"])
+        assert all(c.get("distance_from_head_m") is not None
+                   for c in claims), f"{sid}: a claim has no position"
+        given = head_to_tail_split(claims, S.deliverable_water_L(sid))
+        ordered = sorted(claims, key=lambda c: c["distance_from_head_m"])
+        seen_partial = False
+        for c in ordered:
+            got, need = given[c["farm_id"]], c["water_required_L"]
+            if seen_partial:
+                assert got == 0, (
+                    f"{sid}: {c['farm_id']} received {got:,} L after the "
+                    f"channel had already run dry upstream")
+            elif got < need:
+                seen_partial = True
+    return "water runs out down the channel, never past a dry farm"
+
+
+check("head-to-tail serves in channel order", _head_to_tail_is_ordered)
+
+
+def _new_scorecard_fields():
+    """Every field the Impact panel reads, on every policy column."""
+    need = ["total_yield_kg", "staple_yield_kg", "crops_lost",
+            "farms_below_survival", "farms_with_nothing",
+            "smallholder_kept_pct", "largest_farm_kept_pct",
+            "largest_farm_id", "water_used_L", "value_rupees",
+            "compensation_rupees", "lost_farm_ids", "potential_yield_kg",
+            "staple_potential_kg", "has_smallholders"]
+    sc = _run("T01", "drought", "equity")["scorecard"]
+    assert "current" in sc, \
+        "scorecard has no 'current' column — the Impact panel compares " \
+        "against head-to-tail and would KeyError"
+    for col in ("current", "yield_max", "naive", "emergency", "equity"):
+        missing = [f for f in need if f not in sc[col]]
+        assert not missing, f"scorecard['{col}'] is missing {missing}"
+    return f"{len(need)} fields on 5 policy columns"
+
+
+check("Impact panel has every field it reads", _new_scorecard_fields)
+
+
+def _compensation_costed():
+    """Crops lost must cost money, and zero lost must cost nothing."""
+    sc = _run("T01", "drought", "equity")["scorecard"]
+    for col in ("current", "yield_max", "equity"):
+        row = sc[col]
+        if row["crops_lost"] == 0:
+            assert row["compensation_rupees"] == 0, \
+                f"{col}: no crops lost but compensation is " \
+                f"{row['compensation_rupees']:,}"
+        else:
+            assert row["compensation_rupees"] > 0, \
+                f"{col}: {row['crops_lost']} crop(s) lost but no " \
+                f"compensation costed"
+    return (f"AquaFair owes ₹{sc['equity']['compensation_rupees']:,}, "
+            f"current practice ₹{sc['current']['compensation_rupees']:,}")
+
+
+check("compensation tracks crops lost", _compensation_costed)
+>>>>>>> Stashed changes
 
 
 def _crops_lost_everywhere():

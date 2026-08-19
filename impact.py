@@ -143,10 +143,10 @@ def head_to_tail_split(claims, total_water_L):
     floor, no priority, no negotiation: the only input is where a farm
     happens to sit.
 
-    This is the baseline that matters for deployment. Under the Lower
-    Bhavani Project, when storage fell short and the fifth wetting was
-    cancelled, there was no systematic allocation — farmers went to the
-    RDO and then to court over who got priority. Head-to-tail is the
+    This is the baseline that matters for deployment. When storage falls
+    short in a canal command area there is often no systematic
+    allocation at all — position decides, and the argument that follows
+    goes to the revenue officer and then to court. Head-to-tail is the
     honest model of that, and it is the thing AquaFair has to beat.
 
     Same signature and same return shape as naive_equal_split, so every
@@ -183,15 +183,15 @@ def _summarise(claims, given_by_id):
     potential_yield = 0
     staple_yield = 0
     staple_potential = 0
-    smallholder_yield = 0
-    smallholder_potential = 0
-    crops_lost = 0
-    survival_met = 0
     got_nothing = 0
     value_rupees = 0
     potential_value_rupees = 0
     compensation_rupees = 0
     lost_farm_ids = []
+    smallholder_yield = 0
+    smallholder_potential = 0
+    crops_lost = 0
+    survival_met = 0
 
     for c in claims:
         got = given_by_id.get(c["farm_id"], 0)
@@ -237,7 +237,7 @@ def _summarise(claims, given_by_id):
             crops_lost += 1
             lost_farm_ids.append(c["farm_id"])
             # A crop lost outright is a compensation claim waiting to be
-            # filed. Same test as crops_lost, costed.
+            # filed. Same test as crops_lost, costed at the NDRF rate.
             compensation_rupees += ((c["area_m2"] / M2_PER_ACRE)
                                     * COMPENSATION_PER_ACRE_RUPEES)
         else:
@@ -280,7 +280,7 @@ def _summarise(claims, given_by_id):
         "water_used_L":              sum(given_by_id.values()),
         # Same test as crops_lost, named for the row that counts farms
         # rather than crops. One farm grows one crop here, so the two
-        # numbers are equal by construction — see the Impact panel note.
+        # numbers are equal by construction — the Impact panel says so.
         "farms_below_survival":      crops_lost,
         "farms_with_nothing":        got_nothing,
         "lost_farm_ids":             lost_farm_ids,
@@ -306,12 +306,7 @@ def build_scorecard(claims, total_water_L, smart_allocation=None):
                      re-running the contest loop and drifting.
 
     Returns {"equity": {...}, "yield_max": {...}, "emergency": {...},
-             "naive": {...}, "current": {...}, "headline": {...}}
-
-    "current" is head-to-tail, the status quo. It is deliberately NOT a
-    policy mode in optimizer.py: nobody should be able to select it as
-    an allocation to run, and the coordinator has nothing to negotiate
-    over a rule that only reads a map.
+             "naive": {...}, "headline": {...}}
     """
     out = {}
 
@@ -324,6 +319,10 @@ def build_scorecard(claims, total_water_L, smart_allocation=None):
         out[mode] = _summarise(claims, given)
 
     out["naive"] = _summarise(claims, naive_equal_split(claims, total_water_L))
+    # "current" is head-to-tail, the status quo. Deliberately NOT a
+    # policy mode in optimizer.py: nobody should be able to select it as
+    # an allocation to run, and the coordinator has nothing to negotiate
+    # over a rule that only reads a map.
     out["current"] = _summarise(
         claims, head_to_tail_split(claims, total_water_L))
 

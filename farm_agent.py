@@ -121,6 +121,11 @@ def build_claim(farm, weather, days=None):
         # allocation can never accidentally pool two command areas —
         # Tank A's water does not reach Tank B's farms.
         "source_id": farm.get("source_id"),
+        # Position along the field channel. Carried because
+        # impact.head_to_tail_split() sorts CLAIMS, not farms — the
+        # current-practice baseline serves from the sluice outwards and
+        # needs to know where each plot sits.
+        "distance_from_head_m": farm.get("distance_from_head_m"),
         "farmer_name": farm["farmer_name"],
         "crop": crop,
         "stage": stage,
@@ -136,11 +141,6 @@ def build_claim(farm, weather, days=None):
         # feature is invisible in the demo — seed at least one farm.
         "fairness_debt": float(farm.get("fairness_debt", 0.0)),
         "is_smallholder": farm["is_smallholder"],
-        # Metres from the head of the channel. Irrelevant to the water
-        # this farm needs — it is here because impact.py's
-        # current-practice baseline serves farms in this order, and a
-        # farm with no recorded position is treated as tail-end.
-        "distance_from_head_m": farm.get("distance_from_head_m"),
         "cycle_days": days,
         # Intermediate values, kept so the dashboard can show its working.
         # A farmer told he is getting less water deserves a traceable
