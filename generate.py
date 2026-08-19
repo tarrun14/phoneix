@@ -20,6 +20,7 @@ from pathlib import Path
 
 from constants import KC, STAGES, TYPICAL_YIELD_KG_PER_M2, M2_PER_ACRE
 from sources import list_sources, get_source, DEFAULT_SOURCE
+import db
 
 FIRST_NAMES = [
     "Murugan", "Kavitha", "Rajesh", "Lakshmi", "Suresh", "Meena",
@@ -238,76 +239,9 @@ def generate_farms(n, seed=None, source_id=None):
 # fairness ledger would render blank on every card and the feature
 # would be invisible in the demo.
 
-# Resolved against THIS file, not the working directory. `streamlit run
-# app.py` and `python main.py` can be launched from anywhere, and a
-# relative "demo_farms.csv" would only resolve for one of them.
-DEMO_FARMS_CSV = Path(__file__).with_name("demo_farms.csv")
-
-# ⚠ distance_from_head_m is NOT here. It is computed in demo_farms()
-# from the source's command area, so a channel position cannot drift
-# from the tank record it is derived from — the same reason
-# expected_yield_kg is not in the CSV either.
-DEMO_CSV_FIELDS = ["source_id", "farm_id", "farmer_name", "crop",
-                   "stage", "area_m2", "fairness_debt"]
-
-
 def load_demo_spec(path=None):
-    """Read the demo farms from CSV.
-
-    Validates as it reads. A malformed row should fail here with a line
-    number and a reason, not three modules downstream with a KeyError
-    that names a crop nobody typed.
-    """
-    path = Path(path) if path else DEMO_FARMS_CSV
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{path.name} not found next to generate.py. It holds the 32 "
-            f"demo farms; without it there is no on-stage set.")
-
-    spec = []
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        missing = set(DEMO_CSV_FIELDS) - set(reader.fieldnames or [])
-        if missing:
-            raise ValueError(
-                f"{path.name} is missing column(s): {sorted(missing)}")
-
-        for line, row in enumerate(reader, start=2):
-            crop = row["crop"].strip()
-            stage = row["stage"].strip()
-            if crop not in KC:
-                raise ValueError(
-                    f"{path.name} line {line}: unknown crop {crop!r}. "
-                    f"Known: {sorted(KC)}")
-            if stage not in STAGES:
-                raise ValueError(
-                    f"{path.name} line {line}: unknown stage {stage!r}. "
-                    f"Known: {STAGES}")
-            try:
-                area = int(row["area_m2"])
-                debt = float(row["fairness_debt"])
-            except ValueError as exc:
-                raise ValueError(
-                    f"{path.name} line {line}: {exc}") from exc
-            if area <= 0:
-                raise ValueError(
-                    f"{path.name} line {line}: area_m2 must be > 0")
-
-            spec.append({
-                "source_id": row["source_id"].strip(),
-                "farm_id": row["farm_id"].strip(),
-                "farmer_name": row["farmer_name"].strip(),
-                "crop": crop,
-                "stage": stage,
-                "area_m2": area,
-                "fairness_debt": debt,
-            })
-
-    ids = [r["farm_id"] for r in spec]
-    dupes = sorted({i for i in ids if ids.count(i) > 1})
-    if dupes:
-        raise ValueError(f"{path.name}: duplicate farm_id(s): {dupes}")
-    return spec
+    """Read the demo farms from the database."""
+    return db.query_demo_farms()
 
 
 def demo_farms(source_id=None):

@@ -2,3 +2,9 @@
 *.pyc
 .streamlit/
 venv/
+
+# The record. Data, not code — and it holds names, farms and
+# decisions, which do not belong in a repository.
+aquafair.db
+*.db
+*.db.corrupt-*

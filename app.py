@@ -50,6 +50,12 @@ from optimizer import SMALLHOLDER_BOOST
 from sources import (list_sources, get_source, deliverable_water_L,
                      conveyance_loss_L, DEFAULT_SOURCE)
 
+# The record. Everything else on this page is recomputed from scratch
+# every rerun; db.py is the only thing that remembers.
+import db
+from db import (ROLE_FARMER, ROLE_OFFICER, ROLE_SECRETARY,
+                ROLE_LABEL)
+
 # ══════════════════════════════════════════════════════════════════
 # Palette — petrol blue for water, ochre for scarcity, clay for loss
 # ══════════════════════════════════════════════════════════════════
@@ -322,16 +328,24 @@ def inject_style():
          the theme accent, which put two more colours on a page whose
          rule is that colour means outcome. Dark neutral fill is just as
          prominent against paper and says nothing about a farm. */
-      [data-testid="stBaseButton-primary"] {{
+      /* The form submit button carries its own testid, and without it
+         the Sign in button came up in the theme's red — the one colour
+         on this page that is supposed to mean a crop has failed. */
+      [data-testid="stBaseButton-primary"],
+      [data-testid="stBaseButton-primaryFormSubmit"] {{
           background: {INK}; border-color: {INK};
           font-weight: 600; font-size: {T_BODY};
       }}
       [data-testid="stBaseButton-primary"],
       [data-testid="stBaseButton-primary"] p,
-      [data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"] p {{
+      [data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"] p,
+      [data-testid="stBaseButton-primaryFormSubmit"],
+      [data-testid="stBaseButton-primaryFormSubmit"] p,
+      [data-testid="stBaseButton-primaryFormSubmit"] [data-testid="stMarkdownContainer"] p {{
           color: {PAPER} !important;
       }}
-      [data-testid="stBaseButton-primary"]:hover {{
+      [data-testid="stBaseButton-primary"]:hover,
+      [data-testid="stBaseButton-primaryFormSubmit"]:hover {{
           background: {FLOOR}; border-color: {FLOOR};
       }}
       [data-testid="stCheckbox"] label[data-selected="true"] svg {{
@@ -351,6 +365,13 @@ def inject_style():
       [class*="st-key-logbox"] > div,
       [class*="st-key-logbox"] [data-testid="stMarkdownContainer"] {{
           height: 100%;
+      }}
+
+      /* The decision log reads as rows, so its buttons are left-aligned
+         and quiet — a column of centred labels reads as a menu. */
+      [class*="st-key-runlog"] button {{
+          justify-content: flex-start; font-size: {T_SMALL};
+          border-color: {LINE};
       }}
 
       /* a card and its expander are one unit */
@@ -552,10 +573,15 @@ def card_summary(claim, a):
             f"{min(a['yield_loss_pct'], 100):.0f}% of harvest")
 
 
-def render_card_working(claim, a):
+def render_card_working(claim, a, history=None):
     """What the card no longer says out loud. Every number that used to
     sit under the bar is here, plus the Ky the badge now words in
-    plain language."""
+    plain language.
+
+    `history` is this farm's earlier recorded cycles, passed in rather
+    than fetched: no render function in this file reaches out for its
+    own data. None means the record was not consulted; an empty list
+    means it was and the farm is not in it yet."""
     need = max(1, claim["water_required_L"])
     band, _plain, _colour = ky_band(claim["ky"])
     floor_share = claim["survival_minimum_L"] / need * 100
@@ -580,8 +606,64 @@ def render_card_working(claim, a):
          f"Ky x (1 - {a['satisfaction']:.2f} satisfaction)"),
     ])
 
+    if history is not None:
+        st.markdown(
+            f"<div style='font-size:{T_SMALL};color:{GREY};font-weight:600;"
+            f"letter-spacing:0.06em;text-transform:uppercase;"
+            f"margin:16px 0 6px 0;'>Earlier cycles on record</div>",
+            unsafe_allow_html=True)
+        render_history(history)
 
-def render_farm_cards(claims, allocation, limit=12):
+
+def render_history(rows):
+    """Has this farm been shorted before?
+
+    One bad week is weather. The same farm short every cycle is a policy
+    failing it, and until the runs were written down there was no way to
+    tell those two apart from inside a single screen. This is the panel
+    a farmer opens to answer that, and the one an officer answers to.
+
+    It reads the STORED litres, never today's allocation — a history
+    that recomputed itself would agree with the present by construction
+    and could never show that anything had changed."""
+    if not rows:
+        st.caption("No earlier cycles on record. This is the first "
+                   "allocation written for this farm.")
+        return
+
+    short = sum(1 for r in rows if r["satisfaction"] < FULL_SHARE_PCT)
+    below = sum(1 for r in rows if r["allocated_L"] < r["survival_L"])
+    tone = BAD if below else (WARN if short else OK)
+    tail = (f", and below its survival minimum in "
+            f"<b style='color:{BAD};'>{below}</b>") if below else ""
+    st.markdown(
+        f"<div style='font-size:{T_BODY};color:{INK};margin-bottom:8px;'>"
+        f"Short of a full share in <b style='color:{tone};'>{short}</b> "
+        f"of the last {len(rows)} recorded cycle"
+        f"{'s' if len(rows) != 1 else ''}{tail}.</div>",
+        unsafe_allow_html=True)
+
+    detail_table([
+        (_when(r["timestamp"]),
+         f"{r['allocated_L']:,} L of {r['required_L']:,} L",
+         f"{r['satisfaction'] * 100:.0f}% of what it asked for"
+         + (" &middot; contested" if r["contested"] else "")
+         + (" &middot; below survival"
+            if r["allocated_L"] < r["survival_L"] else "")
+         + (f" &middot; approved" if r["approved_by"] else ""))
+        for r in rows])
+
+
+def _when(iso):
+    """A stored timestamp, readable. Falls back to the raw string rather
+    than throwing: a date that will not parse is still evidence."""
+    try:
+        return datetime.fromisoformat(iso).strftime("%d %b %H:%M")
+    except (TypeError, ValueError):
+        return str(iso)
+
+
+def render_farm_cards(claims, allocation, limit=12, histories=None):
     """One card, one sentence: what this farm grows, and what it got.
 
     The bar keeps the two-pass structure visible (dark = survival floor,
@@ -671,7 +753,10 @@ def render_farm_cards(claims, allocation, limit=12):
 </div>""", unsafe_allow_html=True)
 
             with st.expander("why this amount"):
-                render_card_working(claim, a)
+                render_card_working(
+                    claim, a,
+                    None if histories is None
+                    else histories.get(claim["farm_id"], []))
 
     if len(claims) > limit:
         st.caption(f"Showing {limit} of {len(claims)} farms. "
@@ -774,9 +859,17 @@ def _difference(ym, aq, kind, better="high"):
     return f"{sign}{_kg(abs(gap))}", ahead
 
 
-def impact_rows(sc):
+def impact_rows(sc, name_farms=True):
     """The comparison as data: one dict per row, values straight from
-    the scorecard, so the table and the workings cannot drift apart."""
+    the scorecard, so the table and the workings cannot drift apart.
+
+    Every figure here is a command-area total and names nobody, with one
+    exception: the largest-farm row identifies which farm it means.
+    name_farms=False drops that id for a screen where the reader is
+    entitled to their own allocation and not to anyone else's. The row
+    itself stays — the number is about the area, not about that farm's
+    privacy — and 'the biggest holding in the command area' still says
+    what is being measured."""
     ym, aq, cp = sc["yield_max"], sc["equity"], sc["current"]
     smallholder_acres = SMALLHOLDER_AREA_M2 / M2_PER_ACRE
     has_small = aq["has_smallholders"]
@@ -838,8 +931,9 @@ def impact_rows(sc):
          "better": "high", "compare": has_small},
 
         {"label": "Largest farm harvest kept",
-         "note": f"the biggest holding in the command area "
-                 f"({aq['largest_farm_id']}) — what equity costs the farm "
+         "note": f"the biggest holding in the command area"
+                 + (f" ({aq['largest_farm_id']})" if name_farms else "")
+                 + f" — what equity costs the farm "
                  f"that would otherwise be served first",
          "cp": cp["largest_farm_kept_pct"], "ym": ym["largest_farm_kept_pct"],
          "aq": aq["largest_farm_kept_pct"],
@@ -939,12 +1033,20 @@ def impact_headline(sc, infeasible):
     return line
 
 
-def render_impact(out):
+def render_impact(out, workings=True):
     """Headline, the comparison table, then the workings.
 
     Takes the whole run rather than just the scorecard: the workings
     quote real farms by name, and the headline has to know whether the
-    pool could cover the floors at all."""
+    pool could cover the floors at all.
+
+    That naming is why `workings` exists. The table and the headline are
+    area-wide totals and name nobody; the worked examples under them
+    quote the biggest farm, the largest farm and a farm that lost its
+    crop, by id. On a farmer's screen those are three other people's
+    allocations, so the expander comes off rather than being rewritten
+    around their own farm — an example that called their plot "the
+    largest farm" would be a worse answer than no example."""
     sc = out["scorecard"]
     infeasible = out["coordination"].get("supply_infeasible", False)
 
@@ -968,7 +1070,10 @@ def render_impact(out):
             f"</tr>")
 
     body = ""
-    for r in impact_rows(sc):
+    # Same audience decision as the workings expander: a screen that
+    # does not get the worked examples does not get the farm id in
+    # the largest-farm row either.
+    for r in impact_rows(sc, name_farms=workings):
         if r.get("compare", True):
             diff, ahead = _difference(r["cp"], r["aq"], r["kind"],
                                       r["better"])
@@ -993,13 +1098,20 @@ def render_impact(out):
             f"white-space:nowrap;font-weight:700;"
             f"color:{OK if ahead else GREY};{big}'>{diff}</td></tr>")
 
+    # Four value columns of six-figure numbers do not fit the right-hand
+    # column: measured at 967px inside 384px, which cut "vs current
+    # practice" — the column the section exists to show — off the page
+    # entirely, with no way to scroll to it. It scrolls inside its own
+    # box now, like the five-policy table below it.
     st.markdown(
+        f"<div style='overflow-x:auto;'>"
         f"<table style='width:100%;border-collapse:collapse;"
-        f"font-size:{T_BODY};'>{head}{body}</table>",
+        f"font-size:{T_BODY};'>{head}{body}</table></div>",
         unsafe_allow_html=True)
 
-    with st.expander("how each figure is calculated"):
-        render_impact_working(out)
+    if workings:
+        with st.expander("how each figure is calculated"):
+            render_impact_working(out)
 
     # The status quo leads, because it is the thing being replaced.
     # AquaFair is last, because it is the claim.
@@ -1600,11 +1712,322 @@ def agent_trace_dialog(out, source):
 
 
 # ══════════════════════════════════════════════════════════════════
+# THE RECORD — who is signed in, and what was decided before
+# ══════════════════════════════════════════════════════════════════
+
+def sign_in(officer_id, password=""):
+    """Look the id up on the register and open the dashboard on their
+    own command area.
+
+    ⚠ Must be a callback. It writes st.session_state.source_id, and
+    Streamlit refuses that once the selectbox bound to that key has been
+    instantiated in the same run — callbacks run before the next one."""
+    ss = st.session_state
+    officer = db.verify_officer(officer_id, password)
+    if officer is None:
+        typed = (officer_id or "").strip()
+        ss.login_error = (f"Invalid ID or password."
+                          if typed else "Enter an ID and password to sign in.")
+        return
+    if officer["role"] in (ROLE_FARMER, ROLE_SECRETARY):
+        ss.login_error = "Only officers are allowed to sign in."
+        return
+
+    ss.officer = officer
+    ss.login_error = None
+    ss.viewing_run = None
+    # Seed the number boxes from the readings before they are drawn.
+    # Assigning here rather than relying on the setdefault in
+    # init_state() is what keeps the box and the page showing the same
+    # number after a screen that had no boxes on it — see init_state.
+    ss.w_ETo = float(ss.readings["ETo"])
+    ss.w_rainfall_mm = float(ss.readings["rainfall_mm"])
+    ss.w_tank_liters = float(ss.readings["tank_liters"])
+    # A secretary is constituted for one command area and a farmer farms
+    # in one, so signing in IS choosing the area. The district officer
+    # can move afterwards; the other two cannot.
+    if officer["source_id"] in list_sources():
+        ss.source_id = officer["source_id"]
+        ss.w_tank_liters = float(deliverable_water_L(ss.source_id))
+        ss.readings["tank_liters"] = ss.w_tank_liters
+
+
+def sign_in_typed():
+    sign_in(st.session_state.get("login_id", ""), st.session_state.get("login_password", ""))
+
+
+def sign_out():
+    ss = st.session_state
+    ss.officer = None
+    ss.viewing_run = None
+    ss.login_error = None
+    ss.login_id = ""
+
+
+def open_run(run_id):
+    st.session_state.viewing_run = run_id
+
+
+def close_run():
+    st.session_state.viewing_run = None
+
+
+def render_login(roster, error=None):
+    """The gate, and the disclaimer that has to sit on it.
+
+    There is no password box. Putting one there would imply a check that
+    does not happen, and a judge who typed anything into it would learn
+    the wrong thing about what this prototype is."""
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        section("Sign in")
+
+        with st.form("login", clear_on_submit=False):
+            st.text_input("Officer ID", key="login_id",
+                          placeholder="WRD-ERD-042")
+            st.text_input("Password", key="login_password", type="password")
+            st.form_submit_button("Sign in", type="primary",
+                                  width='stretch', on_click=sign_in_typed)
+        if error:
+            st.error(error)
+
+        st.markdown(
+            f"<div style='font-size:{T_SMALL};color:{GREY};"
+            f"margin:18px 0 8px 0;'>Registered on this prototype — "
+            f"the roster a deployment would not print:</div>",
+            unsafe_allow_html=True)
+        for o in roster:
+            scope = (f"farm {o['farm_id']} &middot; "
+                     f"{get_source(o['source_id'])['name']}"
+                     if o["role"] == ROLE_FARMER else
+                     ("every command area in the district"
+                      if o["role"] == ROLE_OFFICER
+                      else get_source(o["source_id"])["name"]))
+            st.button(f"{o['officer_id']}  —  {o['name']}, "
+                      f"{ROLE_LABEL[o['role']]}",
+                      key=f"login_{o['officer_id']}", width='stretch',
+                      on_click=sign_in, args=(o["officer_id"], "password"))
+            st.markdown(
+                f"<div style='font-size:{T_SMALL};color:{GREY};"
+                f"margin:-6px 0 10px 0;text-align:center;'>{scope}</div>",
+                unsafe_allow_html=True)
+
+
+def render_identity(officer):
+    """Who is signed in, at the top of the sidebar, on every screen.
+
+    A dashboard that decides who gets water has to say whose authority
+    it is acting under, and it has to say it where the person acting
+    cannot miss it."""
+    role = officer["role"]
+    scope = (f"Farm {officer['farm_id']}" if role == ROLE_FARMER
+             else ("District — every command area"
+                   if role == ROLE_OFFICER
+                   else get_source(officer["source_id"])["name"]))
+    st.markdown(
+        f"<div style='border:1px solid {LINE};background:{TINT};"
+        f"border-radius:3px;padding:11px 13px;margin-bottom:10px;'>"
+        f"<div style='font-size:{T_BODY};font-weight:600;color:{INK};'>"
+        f"{officer['name']}</div>"
+        f"<div style='font-size:{T_SMALL};color:{GREY};margin-top:3px;'>"
+        f"{ROLE_LABEL[role]} &middot; {officer['officer_id']}<br>{scope}"
+        f"</div></div>", unsafe_allow_html=True)
+    st.button("Sign out", key="signout", width='stretch', on_click=sign_out)
+
+
+def record_run(out, source, source_id, mode):
+    """Write this allocation to the record. Returns its run_id, or None.
+
+    Called on every rerun a decision-maker is looking at. db.save_run()
+    declines to write the same decision twice, so opening an expander
+    does not add a row — see its docstring for why that is not a hole in
+    append-only.
+
+    `deliverable_L` is out["tank_L"], the volume the engine actually
+    allocated. It is the source's deliverable figure in every normal
+    run; it differs when the demo's scale-with-farm-count switch is on,
+    and the record has to hold what was allocated, not what was on the
+    gauge.
+
+    A failed write must not take the page down: the allocation on screen
+    is still correct, it is only unrecorded, and saying so is better
+    than a traceback over the top of it."""
+    try:
+        return db.save_run(
+            {"source_id":      source_id,
+             "eto":            out["weather"]["ETo"],
+             "rainfall_mm":    out["weather"]["rainfall_mm"],
+             "stored_L":       source["live_storage_L"],
+             "conveyance_pct": source["conveyance_efficiency"],
+             "deliverable_L":  out["tank_L"],
+             "rounds_used":    out["coordination"]["rounds_used"]},
+            out["allocation"], out["claims"], mode)
+    except Exception as exc:            # noqa: BLE001 — demo safety net
+        st.session_state.db_error = f"This run was not recorded: {exc}"
+        return None
+
+
+def load_histories(claims, limit=10):
+    """Earlier recorded cycles for the farms about to be drawn.
+
+    Fetched here so that render_farm_cards() stays a function of its
+    arguments. Only the farms actually shown are looked up — at 100
+    farms the other 88 would be a hundred queries nobody reads."""
+    out = {}
+    for c in claims:
+        try:
+            out[c["farm_id"]] = db.farm_history(c["farm_id"], limit=limit)
+        except Exception:               # noqa: BLE001 — demo safety net
+            out[c["farm_id"]] = []
+    return out
+
+
+def _approval_line(run):
+    """One phrase for where a run stands. Used by both the log and the
+    read-back header, so they cannot describe it differently."""
+    if run["approved_by"]:
+        who = run.get("approved_name") or run["approved_by"]
+        return f"Approved by {who}, {_when(run['approved_at'])}", OK
+    return "Awaiting approval", GREY
+
+
+def render_decision_log(runs, current_run_id):
+    """Every allocation recorded for this command area, newest first.
+
+    The panel that makes the difference between a dashboard and a
+    record: the run on screen is one row of this, and the rows above it
+    are what was decided before anybody was watching."""
+    if not runs:
+        st.caption("No allocations recorded for this command area yet.")
+        return
+
+    for r in runs:
+        mark = "✓" if r["approved_by"] else "·"
+        here = "   ← on screen now" if r["run_id"] == current_run_id else ""
+        st.button(
+            f"{mark}  #{r['run_id']}   {_when(r['timestamp'])}   "
+            f"{r['farm_count']} farms   {r['policy_mode']}{here}",
+            key=f"openrun_{r['run_id']}", width='stretch',
+            on_click=open_run, args=(r["run_id"],),
+            help="Reopen this run exactly as it was recorded.")
+
+
+def render_run_readonly(detail, unedited):
+    """One recorded run, read back.
+
+    Nothing here is recomputed. Every number is the one that was
+    written, which is the whole reason the table exists — a record that
+    re-derived itself on open would show today's answer under an old
+    date and would prove nothing at all."""
+    run, rows = detail["run"], detail["allocations"]
+    stance, colour = _approval_line(run)
+    seal = ("record unedited" if unedited
+            else "⚠ this record does not match its own hash")
+    seal_colour = GREY if unedited else BAD
+
+    st.markdown(
+        f"<div style='border:1px solid {LINE};border-left:4px solid {INK};"
+        f"background:{TINT};border-radius:3px;padding:14px 16px;"
+        f"margin-bottom:16px;'>"
+        f"<div style='font-size:{T_CARD};font-weight:600;color:{INK};'>"
+        f"Run #{run['run_id']} &middot; {_when(run['timestamp'])}</div>"
+        f"<div style='font-size:{T_SMALL};color:{GREY};margin-top:4px;'>"
+        f"Read back from the record. Nothing on this screen is being "
+        f"recomputed &mdash; these are the litres that were allocated."
+        f"</div>"
+        f"<div style='font-size:{T_BODY};color:{colour};margin-top:9px;'>"
+        f"{stance}</div>"
+        f"<div style='font-size:{T_SMALL};color:{seal_colour};"
+        f"margin-top:3px;'>sha256 {run['input_hash'][:16]}… "
+        f"&middot; {seal}</div></div>", unsafe_allow_html=True)
+
+    src = get_source(run["source_id"]) if run["source_id"] else None
+    detail_table([
+        ("Command area",
+         f"{src['name'] if src else run['source_id']}",
+         f"{run['source_id']} · {len(rows)} farms on this run"),
+        ("Evapotranspiration", f"{run['eto']:.1f} mm/day",
+         "Reference ETo for the cycle"),
+        ("Rainfall", f"{run['rainfall_mm']:.0f} mm",
+         f"{run['rainfall_mm'] * EFFECTIVE_RAIN_FRACTION:.1f} mm effective"),
+        ("Stored", f"{run['stored_L']:,.0f} L",
+         "Live storage at the gauge"),
+        ("Conveyance", f"{run['conveyance_pct']:.0%}",
+         "Share of a release that reaches a field"),
+        ("Allocated from", f"{run['deliverable_L']:,.0f} L",
+         "Deliverable water — what the engine had to divide"),
+        ("Policy", run["policy_mode"] or "—",
+         f"{run['rounds_used']} negotiation round(s)"),
+    ])
+
+    st.write("")
+    head = "".join(
+        f"<th style='text-align:{al};padding:7px 0 7px 9px;color:{GREY};"
+        f"font-size:{T_SMALL};font-weight:600;'>{h}</th>"
+        for h, al in (("Farm", "left"), ("Crop", "left"),
+                      ("Needed", "right"), ("Survival", "right"),
+                      ("Given", "right"), ("Share", "right"),
+                      ("Yield lost", "right")))
+    body = ""
+    for a in rows:
+        lost = a["allocated_L"] < a["survival_L"]
+        tone = BAD if lost else (OK if a["satisfaction"] >= FULL_SHARE_PCT
+                                 else WARN)
+        tag = ("<span style='color:%s;'> &middot; contested</span>" % GREY
+               if a["contested"] else "")
+        body += (
+            f"<tr style='border-top:1px solid {LINE};'>"
+            f"<td style='padding:7px 0 7px 9px;color:{INK};'>{a['farm_id']}"
+            f"{tag}</td>"
+            f"<td style='padding:7px 0 7px 9px;color:{GREY};'>"
+            f"{(a['crop'] or '').capitalize()}</td>"
+            f"<td style='text-align:right;padding:7px 0 7px 9px;color:{INK};'>"
+            f"{a['required_L']:,}</td>"
+            f"<td style='text-align:right;padding:7px 0 7px 9px;color:{GREY};'>"
+            f"{a['survival_L']:,}</td>"
+            f"<td style='text-align:right;padding:7px 0 7px 9px;color:{INK};"
+            f"font-weight:600;'>{a['allocated_L']:,}</td>"
+            f"<td style='text-align:right;padding:7px 0 7px 9px;color:{tone};"
+            f"font-weight:600;'>{a['satisfaction'] * 100:.0f}%</td>"
+            f"<td style='text-align:right;padding:7px 0 7px 9px;color:{GREY};'>"
+            f"{min(a['yield_loss_pct'], 100):.0f}%</td></tr>")
+    st.markdown(
+        f"<div style='overflow-x:auto;'><table style='width:100%;"
+        f"border-collapse:collapse;font-size:{T_BODY};'>"
+        f"<tr>{head}</tr>{body}</table></div>", unsafe_allow_html=True)
+
+    with st.expander("What each farm was told"):
+        st.caption("The justification written at the time, farm by farm. "
+                   "Stored with the allocation, not regenerated now.")
+        detail_table([(a["farm_id"], f"{a['allocated_L']:,} L",
+                       a["justification"] or "—") for a in rows])
+
+
+# ══════════════════════════════════════════════════════════════════
 # STATE
 # ══════════════════════════════════════════════════════════════════
 
 def init_state():
     ss = st.session_state
+    # The record, opened once per session. init_db() creates what is
+    # missing and seeds nothing that already exists, so this is safe on
+    # every start; a file that is not a database at all is moved aside
+    # and rebuilt, and ss.db_quarantined carries the path so the page
+    # can say so. A silently recreated audit trail is a lost one.
+    if "db_ready" not in ss:
+        ss.db_quarantined = None
+        ss.db_error = None
+        try:
+            ss.db_quarantined = db.init_db()
+        except Exception as exc:        # noqa: BLE001 — demo safety net
+            ss.db_error = f"The record could not be opened: {exc}"
+        ss.db_ready = True
+    ss.setdefault("db_error", None)
+    ss.setdefault("db_quarantined", None)
+    ss.setdefault("officer", None)      # the signed-in row; None = gate
+    ss.setdefault("login_error", None)
+    ss.setdefault("viewing_run", None)  # a run_id being read back
+    ss.setdefault("run_id", None)       # the record this rerun wrote
     ss.setdefault("farms", demo_farms())
     ss.setdefault("mode", "equity")                # equity, never yield_max
     ss.setdefault("scale_tank", False)             # sources are real volumes
@@ -1612,7 +2035,20 @@ def init_state():
     # The readings ARE the state. There is no "current scenario" to fall
     # out of step with them — a preset button just writes two of these
     # numbers and the whole dashboard follows.
-    for k, v in WEATHER_STATES[DEFAULT_WEATHER].items():
+    #
+    # ⚠ They are kept HERE, in a plain key, as well as in the w_* keys
+    # the number boxes are bound to. Two screens do not draw those boxes
+    # — the login screen and a farmer's page — and a widget key that
+    # goes a whole run without its widget does not come back reliably:
+    # the box returned showing 0.00 while the panel beside it was still
+    # computing on 6.2, which is worse than either number alone. So the
+    # readings live in ss.readings, the boxes are seeded from it on the
+    # way into a screen that has them, and mirrored back into it on the
+    # way out.
+    ss.setdefault("readings",
+                  {k: float(v)
+                   for k, v in WEATHER_STATES[DEFAULT_WEATHER].items()})
+    for k, v in ss.readings.items():
         ss.setdefault(f"w_{k}", float(v))
     # Open on the default source's deliverable water, not the preset's
     # tank figure — otherwise the first screen shows a volume that
@@ -1620,6 +2056,7 @@ def init_state():
     ss.setdefault("_water_seeded", False)
     if not ss._water_seeded:
         ss.w_tank_liters = float(deliverable_water_L(ss.source_id))
+        ss.readings["tank_liters"] = ss.w_tank_liters
         ss._water_seeded = True
     ss.setdefault("notice", None)
     # Change detection ONLY. Nothing on screen reads these — the badge is
@@ -1664,6 +2101,10 @@ def load_source_water():
     """
     st.session_state.w_tank_liters = float(
         deliverable_water_L(st.session_state.source_id))
+    # A run being read back belongs to the area it was opened from.
+    # Carrying it across a switch would leave last area's decision on
+    # screen under this area's sidebar.
+    st.session_state.viewing_run = None
 
 
 def note_condition_change(label, eto, rainfall_mm, shortfall):
@@ -1723,6 +2164,55 @@ def next_farm_id():
     return f"F{i:03d}"
 
 
+def render_readings_readonly(eto, rainfall_mm, tank_L):
+    """The three readings, shown rather than offered.
+
+    A farmer is not given the boxes. The numbers that decide their
+    allocation are a WUA and WRD matter, and a farmer arguing with the
+    gauge in their own sidebar would be a different application. What
+    they are owed is sight of the same three figures the secretary
+    typed, which is what this is."""
+    # Stacked, not tabled. detail_table() is three columns wide and the
+    # sidebar is not: the notes column ran off the edge of it, one word
+    # per line.
+    rows = [
+        ("Evapotranspiration", f"{eto:.1f} mm/day",
+         "what a standard field loses to the air each day"),
+        ("Rainfall this cycle", f"{rainfall_mm:.0f} mm",
+         f"{rainfall_mm * EFFECTIVE_RAIN_FRACTION:.1f} mm of it reaches "
+         f"the roots"),
+        ("Water for this allocation", f"{tank_L:,.0f} L",
+         "deliverable water, after channel losses"),
+    ]
+    st.markdown(
+        f"<div style='border-left:2px solid {LINE};padding-left:10px;"
+        f"margin:2px 0 10px 0;'>" + "".join(
+            f"<div style='margin-bottom:9px;'>"
+            f"<div style='font-size:{T_SMALL};color:{GREY};'>{label}</div>"
+            f"<div style='font-size:{T_BODY};font-weight:600;color:{INK};'>"
+            f"{value}</div>"
+            f"<div style='font-size:{T_SMALL};color:{GREY};line-height:1.5;'>"
+            f"{note}</div></div>" for label, value, note in rows)
+        + "</div>", unsafe_allow_html=True)
+    st.caption("Entered by the WUA secretary for this command area.")
+
+
+def approve(run_id, officer_id):
+    """Sign a run off, and say what happened either way.
+
+    The refusal path is not an error state to hide: 'this run is already
+    approved' is the schema protecting a signature, and the person who
+    just clicked has a right to know whose it is."""
+    try:
+        db.approve_run(run_id, officer_id)
+        st.session_state.notice = (
+            "success", f"Run #{run_id} approved and recorded against "
+                       f"{officer_id}.")
+    except Exception as exc:            # noqa: BLE001 — demo safety net
+        st.session_state.notice = ("error", f"Not approved: {exc}")
+    st.rerun()
+
+
 # ══════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════
@@ -1744,15 +2234,41 @@ def main():
     and explains why.</div>
 </div>""", unsafe_allow_html=True)
 
+    # ---------------- the gate ----------------
+    # Everything past this point decides somebody's water. There is no
+    # anonymous view of it.
+    if ss.officer is None:
+        render_login(db.list_officers(), ss.login_error)
+        return
+
+    officer = ss.officer
+    role = officer["role"]
+    is_farmer = role == ROLE_FARMER
+    # Only the district officer moves between command areas. A WUA is
+    # constituted for ONE, and sources.py already says a WUA has no
+    # standing over another's water. This is that limit, enforced rather
+    # than described.
+    can_switch_area = role == ROLE_OFFICER
+
     # ---------------- sidebar controls ----------------
     with st.sidebar:
+        render_identity(officer)
         section("Command area")
-        st.selectbox(
-            "Tank or canal", list_sources(), key="source_id",
-            format_func=lambda s: f"{get_source(s)['name']}  ({s})",
-            on_change=load_source_water,
-            help="Each source serves its own farms and its own WUA. "
-                 "Tank A never gives water to Tank B's farms.")
+        if can_switch_area:
+            st.selectbox(
+                "Tank or canal", list_sources(), key="source_id",
+                format_func=lambda s: f"{get_source(s)['name']}  ({s})",
+                on_change=load_source_water,
+                help="Each source serves its own farms and its own WUA. "
+                     "Tank A never gives water to Tank B's farms.")
+        else:
+            st.markdown(
+                f"<div style='font-size:{T_BODY};font-weight:600;"
+                f"color:{INK};margin-bottom:2px;'>"
+                f"{get_source(ss.source_id)['name']}</div>"
+                f"<div style='font-size:{T_SMALL};color:{GREY};'>"
+                f"{ss.source_id} &middot; the only command area this "
+                f"sign-in covers</div>", unsafe_allow_html=True)
         _t = get_source(ss.source_id)
         _usable = deliverable_water_L(ss.source_id)
         _served = len(farms_for_source(ss.farms, ss.source_id))
@@ -1773,128 +2289,192 @@ def main():
             f"{conveyance_loss_L(ss.source_id):,.0f} L</span></div>",
             unsafe_allow_html=True)
 
-        section("Conditions")
-        st.caption("This week's readings. Everything below is computed "
-                   "from these three numbers.")
+        # A farmer is shown the readings; they do not set them, and
+        # they do not load farm sets or add plots. Everything in this
+        # branch is a control over somebody else's allocation.
+        if is_farmer:
+            render_readings_readonly(ss.readings["ETo"],
+                                     ss.readings["rainfall_mm"],
+                                     ss.readings["tank_liters"])
+        else:
+            section("Conditions")
+            st.caption("This week's readings. Everything below is computed "
+                       "from these three numbers.")
 
-        # Widgets are bound to session_state by key. Streamlit ignores
-        # `value=` once a key exists, so binding directly is the only way
-        # a preset button can change what the boxes show. Passing both is
-        # how the boxes and the panel ended up disagreeing.
-        st.number_input(
-            "Reference evapotranspiration (mm/day)",
-            0.0, 15.0, step=0.1, key="w_ETo",
-            help="How much water a standard grass field loses per day. "
-                 "Tamil Nadu runs roughly 4-7 depending on season.")
-        st.number_input(
-            "Rainfall this cycle (mm)",
-            0.0, 500.0, step=1.0, key="w_rainfall_mm",
-            help=f"Only {EFFECTIVE_RAIN_FRACTION:.0%} reaches the root "
-                 f"zone; the rest runs off or drains below it.")
-        st.number_input(
-            "Water for this allocation (litres)",
-            0.0, 1e9, step=10_000.0, key="w_tank_liters",
-            help="Deliverable water, seeded from the selected source. "
-                 "In deployment this is a gauge reading less conveyance "
-                 "loss, not a setting.")
+            # Widgets are bound to session_state by key. Streamlit ignores
+            # `value=` once a key exists, so binding directly is the only way
+            # a preset button can change what the boxes show. Passing both is
+            # how the boxes and the panel ended up disagreeing.
+            st.number_input(
+                "Reference evapotranspiration (mm/day)",
+                0.0, 15.0, step=0.1, key="w_ETo",
+                help="How much water a standard grass field loses per day. "
+                     "Tamil Nadu runs roughly 4-7 depending on season.")
+            st.number_input(
+                "Rainfall this cycle (mm)",
+                0.0, 500.0, step=1.0, key="w_rainfall_mm",
+                help=f"Only {EFFECTIVE_RAIN_FRACTION:.0%} reaches the root "
+                     f"zone; the rest runs off or drains below it.")
+            st.number_input(
+                "Water for this allocation (litres)",
+                0.0, 1e9, step=10_000.0, key="w_tank_liters",
+                help="Deliverable water, seeded from the selected source. "
+                     "In deployment this is a gauge reading less conveyance "
+                     "loss, not a setting.")
 
-        st.markdown(
-            f"<div style='font-size:{T_SMALL};color:{GREY};"
-            f"border-left:2px solid {LINE};padding-left:9px;"
-            f"margin:2px 0 10px 0;'>"
-            f"Effective rain <b style='color:{INK};'>"
-            f"{ss.w_rainfall_mm * EFFECTIVE_RAIN_FRACTION:.1f}</b> mm "
-            f"of {ss.w_rainfall_mm:.0f} mm</div>", unsafe_allow_html=True)
-
-        # Presets are a shortcut for typing, not a mode. They write ETo
-        # and rainfall, and stop there: the badge above is classified
-        # from those numbers, so a preset cannot claim a condition the
-        # readings do not support. Buttons, not a radio, for the same
-        # reason — a radio would still be lit on "Heavy rain" after you
-        # edited the numbers under it.
-        # One per row: three across a sidebar column broke the labels
-        # mid-word ("Norma l", "Droug ht"). Full width fits them whole.
-        #
-        # The description is printed under each button, not passed as
-        # `help`. Streamlit floats a button tooltip ABOVE the button,
-        # where it covered the caption above on hover. Text that is
-        # always visible cannot collide with anything, and a judge
-        # reading the sidebar aloud gets it for free.
-        st.caption("Or load known weather readings:")
-        for key, (label, note) in SCENARIOS.items():
-            st.button(label, key=f"preset_{key}", width='stretch',
-                      on_click=load_preset, args=(key,))
             st.markdown(
                 f"<div style='font-size:{T_SMALL};color:{GREY};"
-                f"margin:-6px 0 8px 0;text-align:center;'>{note}</div>",
-                unsafe_allow_html=True)
+                f"border-left:2px solid {LINE};padding-left:9px;"
+                f"margin:2px 0 10px 0;'>"
+                f"Effective rain <b style='color:{INK};'>"
+                f"{ss.w_rainfall_mm * EFFECTIVE_RAIN_FRACTION:.1f}</b> mm "
+                f"of {ss.w_rainfall_mm:.0f} mm</div>", unsafe_allow_html=True)
 
-        st.checkbox(
-            "Scale water with farm count", key="scale_tank",
-            help="Off by default: the figure above is a real volume for "
-                 "this command area. Turn it on only when using a demo "
-                 "preset volume with a farm count it was not sized for.")
+            # Presets are a shortcut for typing, not a mode. They write ETo
+            # and rainfall, and stop there: the badge above is classified
+            # from those numbers, so a preset cannot claim a condition the
+            # readings do not support. Buttons, not a radio, for the same
+            # reason — a radio would still be lit on "Heavy rain" after you
+            # edited the numbers under it.
+            # One per row: three across a sidebar column broke the labels
+            # mid-word ("Norma l", "Droug ht"). Full width fits them whole.
+            #
+            # The description is printed under each button, not passed as
+            # `help`. Streamlit floats a button tooltip ABOVE the button,
+            # where it covered the caption above on hover. Text that is
+            # always visible cannot collide with anything, and a judge
+            # reading the sidebar aloud gets it for free.
+            st.caption("Or load known weather readings:")
+            for key, (label, note) in SCENARIOS.items():
+                st.button(label, key=f"preset_{key}", width='stretch',
+                          on_click=load_preset, args=(key,))
+                st.markdown(
+                    f"<div style='font-size:{T_SMALL};color:{GREY};"
+                    f"margin:-6px 0 8px 0;text-align:center;'>{note}</div>",
+                    unsafe_allow_html=True)
 
-        st.divider()
-        section("Farms")
-        st.caption(f"{_served} under this source, "
-                   f"{len(ss.farms)} in the district")
+            st.checkbox(
+                "Scale water with farm count", key="scale_tank",
+                help="Off by default: the figure above is a real volume for "
+                     "this command area. Turn it on only when using a demo "
+                     "preset volume with a farm count it was not sized for.")
 
-        b1, b2 = st.columns(2)
-        if b1.button("Demo set", width='stretch'):
-            ss.farms = demo_farms()
-            ss.notice = None
-            st.rerun()
-        if b2.button("Load 100", width='stretch'):
-            ss.farms = generate_farms(100, seed=42)
-            ss.notice = None
-            st.rerun()
+            st.divider()
+            section("Farms")
+            st.caption(f"{_served} under this source, "
+                       f"{len(ss.farms)} in the district")
 
-        with st.expander("Add a farm"):
-            with st.form("add_farm", clear_on_submit=True):
-                st.caption(f"Joins {get_source(ss.source_id)['name']}.")
-                name = st.text_input("Farmer's name")
-                crop = st.selectbox("Crop", sorted(KC),
-                                    format_func=str.capitalize)
-                stage = st.selectbox("Growth stage", STAGES,
-                                     format_func=lambda s: s.capitalize())
-                area_ac = st.number_input("Area (acres)", 0.1, 100.0, 2.0, 0.1)
-                debt = st.slider("Owed from past cycles", 0.0, 2.0, 0.0, 0.1,
-                                 help="Raises priority. A farm short-changed "
-                                      "last cycle ranks higher now.")
-                if st.form_submit_button("Add farm", width='stretch'):
-                    clean = name.strip()
-                    if not clean:
-                        ss.notice = ("error", "Enter a farmer's name.")
-                    else:
-                        from constants import TYPICAL_YIELD_KG_PER_M2
-                        area_m2 = round(area_ac * M2_PER_ACRE)
-                        ss.farms.append({
-                            "farm_id": next_farm_id(),
-                            "source_id": ss.source_id,
-                            "farmer_name": clean,
-                            "crop": crop,
-                            "stage": stage,
-                            "area_m2": area_m2,
-                            "soil_moisture_pct": 35.0,
-                            "expected_yield_kg": max(
-                                1, round(area_m2 * TYPICAL_YIELD_KG_PER_M2[crop])),
-                            "is_smallholder": area_m2 < SMALLHOLDER_AREA_M2,
-                            "fairness_debt": round(debt, 2),
-                            "distance_from_head_m": next_tail_position(
-                                ss.source_id),
-                        })
-                        ss.notice = ("success",
-                                     f"Added {clean}'s {crop} under "
-                                     f"{get_source(ss.source_id)['name']}. "
-                                     f"Everything below recomputed.")
-                    st.rerun()
+            b1, b2 = st.columns(2)
+            if b1.button("Demo set", width='stretch'):
+                ss.farms = demo_farms()
+                ss.notice = None
+                st.rerun()
+            if b2.button("Load 100", width='stretch'):
+                ss.farms = generate_farms(100, seed=42)
+                ss.notice = None
+                st.rerun()
+
+            with st.expander("Add a farm"):
+                with st.form("add_farm", clear_on_submit=True):
+                    st.caption(f"Joins {get_source(ss.source_id)['name']}.")
+                    name = st.text_input("Farmer's name")
+                    crop = st.selectbox("Crop", sorted(KC),
+                                        format_func=str.capitalize)
+                    stage = st.selectbox("Growth stage", STAGES,
+                                         format_func=lambda s: s.capitalize())
+                    area_ac = st.number_input("Area (acres)", 0.1, 100.0, 2.0, 0.1)
+                    debt = st.slider("Owed from past cycles", 0.0, 2.0, 0.0, 0.1,
+                                     help="Raises priority. A farm short-changed "
+                                          "last cycle ranks higher now.")
+                    if st.form_submit_button("Add farm", width='stretch'):
+                        clean = name.strip()
+                        if not clean:
+                            ss.notice = ("error", "Enter a farmer's name.")
+                        else:
+                            from constants import TYPICAL_YIELD_KG_PER_M2
+                            area_m2 = round(area_ac * M2_PER_ACRE)
+                            ss.farms.append({
+                                "farm_id": next_farm_id(),
+                                "source_id": ss.source_id,
+                                "farmer_name": clean,
+                                "crop": crop,
+                                "stage": stage,
+                                "area_m2": area_m2,
+                                "soil_moisture_pct": 35.0,
+                                "expected_yield_kg": max(
+                                    1, round(area_m2 * TYPICAL_YIELD_KG_PER_M2[crop])),
+                                "is_smallholder": area_m2 < SMALLHOLDER_AREA_M2,
+                                "fairness_debt": round(debt, 2),
+                                "distance_from_head_m": next_tail_position(
+                                    ss.source_id),
+                            })
+                            ss.notice = ("success",
+                                         f"Added {clean}'s {crop} under "
+                                         f"{get_source(ss.source_id)['name']}. "
+                                         f"Everything below recomputed.")
+                        st.rerun()
+
+    # The readings this run works from. A farmer's sidebar has no boxes,
+    # so theirs come from the record of what the secretary entered; for
+    # everyone else the boxes are the truth and are mirrored back.
+    if is_farmer:
+        readings = dict(ss.readings)
+    else:
+        readings = {"ETo": float(ss.w_ETo),
+                    "rainfall_mm": float(ss.w_rainfall_mm),
+                    "tank_liters": float(ss.w_tank_liters)}
+        ss.readings = readings
 
     # ---------------- compute once, render from it ----------------
     if ss.notice:
         kind, msg = ss.notice
         (st.success if kind == "success" else st.error)(msg)
         ss.notice = None
+
+    if ss.db_quarantined:
+        st.warning(
+            f"The record file could not be read and a fresh one was "
+            f"created. The unreadable file was kept as "
+            f"{ss.db_quarantined} — nothing was deleted, and it may "
+            f"still be recoverable. Runs written before it broke are "
+            f"not in the log below.")
+    if ss.db_error:
+        st.error(ss.db_error)
+        ss.db_error = None
+
+    # Reading the record instead of making a decision. compute() is
+    # never called on this branch: a replay that recomputed would print
+    # today's answer under an old date and would prove nothing.
+    if ss.viewing_run is not None:
+        detail = db.run_detail(ss.viewing_run)
+        st.button("Back to the live allocation", key="close_run",
+                  on_click=close_run)
+        st.write("")
+        if detail is None:
+            st.error(f"Run #{ss.viewing_run} is not on the record.")
+            return
+        # The same limit as the sidebar: a secretary and a farmer are
+        # tied to one command area, and that has to hold for the record
+        # as well as for the live page. A run id is a guessable integer,
+        # and an audit trail readable by anyone who can type one is not
+        # a boundary at all.
+        if not can_switch_area and detail["run"]["source_id"] != \
+                officer["source_id"]:
+            st.error(f"Run #{ss.viewing_run} belongs to another command "
+                     f"area. This sign-in covers "
+                     f"{get_source(officer['source_id'])['name']} only.")
+            return
+        if is_farmer:
+            detail = {"run": detail["run"],
+                      "allocations": [a for a in detail["allocations"]
+                                      if a["farm_id"] == officer["farm_id"]]}
+        render_run_readonly(detail, db.verify_integrity(ss.viewing_run))
+        if role == ROLE_OFFICER and not detail["run"]["approved_by"]:
+            st.write("")
+            if st.button(f"Approve run #{detail['run']['run_id']}",
+                         key="approve_old", type="primary"):
+                approve(detail["run"]["run_id"], officer["officer_id"])
+        return
 
     # ONE command area. Filtered before compute() is called, so the
     # engine is never even shown another source's farms.
@@ -1905,9 +2485,7 @@ def main():
                 f"load the demo set, or pick another command area.")
         return
 
-    weather = {"ETo": ss.w_ETo,
-               "rainfall_mm": ss.w_rainfall_mm,
-               "tank_liters": ss.w_tank_liters}
+    weather = dict(readings)
     out = compute(served, weather, ss.mode, scale_tank=ss.scale_tank)
 
     if "error" in out:
@@ -1915,15 +2493,24 @@ def main():
         return
 
     out["mode"] = ss.mode
+    # Recorded before anything is drawn. save_run() declines to write
+    # the same decision twice, so opening an expander does not add a
+    # row — a log with four hundred identical entries is the same as no
+    # log at all.
+    #
+    # A farmer's visit is not a decision and does not create one. Their
+    # page reads the record; it does not write to it.
+    if not is_farmer:
+        ss.run_id = record_run(out, source, ss.source_id, ss.mode)
     render_top_bar(out, source)
 
     # Classified here, every rerun, from the readings and the shortfall
     # the engine just produced. Nothing carries a label forward.
     shortfall = shortfall_pct(out)
     condition, condition_colour, condition_why = classify_conditions(
-        ss.w_ETo, ss.w_rainfall_mm, shortfall)
+        readings["ETo"], readings["rainfall_mm"], shortfall)
     weather_line = note_condition_change(
-        condition, ss.w_ETo, ss.w_rainfall_mm, shortfall)
+        condition, readings["ETo"], readings["rainfall_mm"], shortfall)
     render_condition_badge(condition, condition_colour, condition_why)
     st.write("")
 
@@ -1931,6 +2518,16 @@ def main():
         st.error("Supply is below the total survival minimum. Every farm is "
                  "under its floor. No reallocation can fix a shortfall this "
                  "size — only more water.")
+
+    # A farmer sees their own field, and the other farms are not on
+    # the page at all — not greyed out, not summarised, not there. The
+    # allocation they are owed an explanation for is one row deep.
+    shown = ([c for c in out["claims"]
+              if c["farm_id"] == officer["farm_id"]] if is_farmer
+             else out["claims"])
+    # Only the cards actually drawn are looked up. At 100 farms the
+    # other 88 would be a hundred queries nobody reads.
+    histories = load_histories(shown[:12])
 
     left, right = st.columns([3, 2], gap="large")
 
@@ -1950,24 +2547,62 @@ def main():
             f"above survival, reduced yield&nbsp;&nbsp;"
             f"<span style='color:{BAD};'>&#9632;</span> below survival, "
             f"the crop fails</div>", unsafe_allow_html=True)
-        render_farm_cards(out["claims"], out["allocation"], limit=12)
+        if is_farmer and not shown:
+            st.info(f"Farm {officer['farm_id']} is not in the farm list "
+                    f"loaded for {source['name']}. Load the demo set to "
+                    f"see it.")
+        render_farm_cards(shown, out["allocation"], limit=12,
+                          histories=histories)
 
     with right:
-        # The whole pitch in one button: not a summary of the trace, the
-        # trace itself, rebuilt from this run.
-        if st.button("How the four agents worked", key="open_trace",
-                     type="primary", width='stretch'):
-            agent_trace_dialog(out, source)
-        st.caption("Every calculation behind this allocation, agent by "
-                   "agent, from the live run.")
-        st.write("")
+        # The trace names every farm in the command area, so it is not a
+        # farmer's panel. Their own working is on their own card.
+        if not is_farmer:
+            # The whole pitch in one button: not a summary of the trace,
+            # the trace itself, rebuilt from this run.
+            if st.button("How the four agents worked", key="open_trace",
+                         type="primary", width='stretch'):
+                agent_trace_dialog(out, source)
+            st.caption("Every calculation behind this allocation, agent "
+                       "by agent, from the live run.")
+            st.write("")
 
         # Impact sits beside the first farm cards now. It is the claim
         # the page is making, and it was below the fold; the log is the
         # evidence, and it is the panel that grows with the run, so it
         # is the one that should absorb the leftover column height.
         section("Impact")
-        render_impact(out)
+        render_impact(out, workings=not is_farmer)
+
+        st.write("")
+        section("Decision log")
+        st.caption(f"Every allocation recorded for {source['name']}. "
+                   f"Open one to read it back as it was written.")
+        runs = db.recent_runs(ss.source_id, limit=20)
+        with st.container(height=232, key="runlog"):
+            render_decision_log(runs, ss.run_id)
+
+        current = next((r for r in runs if r["run_id"] == ss.run_id), None)
+        if current and current["approved_by"]:
+            st.caption(f"Run #{current['run_id']} — "
+                       f"{_approval_line(current)[0].lower()}.")
+        elif current and role == ROLE_OFFICER:
+            if st.button("Approve this allocation", key="approve_now",
+                         type="primary", width='stretch'):
+                approve(current["run_id"], officer["officer_id"])
+        elif current:
+            st.button("Approve this allocation", key="approve_now",
+                      width='stretch', disabled=True,
+                      help="A run is signed off by the district WRD "
+                           "officer. The secretary runs and records the "
+                           "allocation; the approval is not theirs to "
+                           "give.")
+
+        # The agent log names other farms and their outcomes, and the
+        # working table is every farm on one sheet. Neither belongs on a
+        # farmer's screen.
+        if is_farmer:
+            return
 
         st.write("")
         section("What the agents did")
