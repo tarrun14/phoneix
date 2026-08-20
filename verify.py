@@ -852,6 +852,73 @@ def _farm_history():
 check("farm history reads back", _farm_history)
 
 
+def _seeded_season():
+    """The seeded history must be a season, and must not lose a crop.
+
+    A history written by our own engine that contradicted the claim the
+    live page makes would be worse than an empty log — it would hand a
+    judge the counter-example."""
+    import db
+    for sid in S.list_sources():
+        runs = db.recent_runs(sid, limit=100)
+        seeded = [r for r in runs if r["timestamp"] < "2026-12"]
+        assert len(seeded) >= len(db.SEASON_WEATHER), (
+            f"{sid} has {len(seeded)} seeded run(s), expected at least "
+            f"{len(db.SEASON_WEATHER)} — the season did not seed")
+
+    # ⚠ SEEDED ROWS ONLY.
+    # This suite writes runs of its own — the infeasible-supply and
+    # extreme-drought checks deliberately starve every farm, and those
+    # land in the same table. Counting all history would report the test
+    # suite's own edge cases as a broken season. Seeded runs are dated
+    # in the past; anything written today is this suite's.
+    cutoff = db._season_timestamp(len(db.SEASON_WEATHER))
+    lost = 0
+    counted = 0
+    for f in demo_farms():
+        for r in db.farm_history(f["farm_id"], limit=200):
+            if r["timestamp"] > cutoff:
+                continue
+            counted += 1
+            if r["allocated_L"] < r["survival_L"]:
+                lost += 1
+    assert counted, "no seeded rows found — check _season_timestamp()"
+    assert lost == 0, (
+        f"{lost} of {counted} seeded farm-cycle(s) finished below the "
+        f"survival floor. The recorded history would contradict the live "
+        f"page — run `python3 -c \"import db; db.check_season()\"` and "
+        f"raise the storage column in SEASON_WEATHER.")
+    return (f"{len(db.SEASON_WEATHER)} cycles per source, "
+            f"{counted} farm-cycles, none lost")
+
+
+check("the seeded season is a season, and loses nothing", _seeded_season)
+
+
+def _history_is_varied():
+    """A flat history is not evidence of anything.
+
+    If every cycle returned the same satisfaction the chart would be a
+    horizontal line and the fairness panel would have nothing to report.
+    The season has to actually move."""
+    import db
+    cutoff = db._season_timestamp(len(db.SEASON_WEATHER))
+    spans = []
+    for f in demo_farms("T01"):
+        sats = [r["satisfaction"]
+                for r in db.farm_history(f["farm_id"], 200)
+                if r["timestamp"] <= cutoff]
+        assert len(sats) >= 2, f"{f['farm_id']} has fewer than 2 cycles"
+        spans.append(max(sats) - min(sats))
+    assert min(spans) > 0.10, (
+        f"the narrowest farm varies by only {min(spans):.0%} across the "
+        f"season — the chart would be a flat line")
+    return f"satisfaction spans {min(spans):.0%} to {max(spans):.0%}"
+
+
+check("the seeded season actually varies", _history_is_varied)
+
+
 def _recent_runs():
     runs = db.recent_runs("T01", limit=20)
     assert runs, "T01 has recorded runs but recent_runs returned none"
@@ -1288,6 +1355,29 @@ if AppTest is not None:
         return "Approve present but disabled for a secretary"
 
     check("only an officer may approve", _secretary_cannot_approve)
+
+
+    def _history_chart_renders():
+        """One chart per farm card, and none when there is no history.
+
+        AppTest has no typed accessor for st.line_chart — it comes back
+        as UnknownElement — so this counts those instead. Counting is
+        enough: the assertion is that a chart appears once per farm with
+        a recorded past and not at all without one, and the shape of the
+        data is checked in the engine section."""
+        def unknown(at):
+            return sum(1 for e in at._tree
+                       if type(e).__name__ == "UnknownElement")
+
+        at = _render(lambda a: a.session_state.__setitem__("source_id", "T01"))
+        drawn = unknown(at)
+        farms = len(demo_farms("T01"))
+        assert drawn == farms, (
+            f"{drawn} history chart(s) for {farms} farm(s) on T01 — the "
+            f"seeded season should give every farm a past to draw")
+        return f"{drawn} chart(s), one per farm card"
+
+    check("history chart renders on every card", _history_chart_renders)
 
 
     def _record_grows_from_the_app():

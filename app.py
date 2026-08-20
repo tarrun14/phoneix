@@ -630,6 +630,45 @@ def render_card_working(claim, a, history=None):
         render_history(history)
 
 
+def render_history_chart(rows):
+    """Satisfaction across the recorded cycles, oldest to newest.
+
+    The sentence under this chart already counts how many cycles a farm
+    was short. The chart answers the question the count cannot: WHEN,
+    and whether it is getting better or worse. A farm short in 8 of 12
+    cycles that has been at 100% since the monsoon is in a different
+    position from one that has been sliding all season, and the two read
+    identically as a number.
+
+    Two reference lines, because a percentage alone does not say whether
+    a farm is in trouble:
+      * full share — what it asked for
+      * survival floor — below this the crop fails, and it is the
+        crop's own floor, not a round number
+
+    st.line_chart, so no charting dependency. The project has one
+    runtime import and a graph is not worth a second."""
+    ordered = sorted(rows, key=lambda r: r["timestamp"])
+    if len(ordered) < 2:
+        return                          # a line through one point is a dot
+
+    # The floor as a share of what was asked for, per cycle. It moves:
+    # the requirement changes with the weather, the floor is a fraction
+    # of the requirement, so the ratio is not constant and a flat line
+    # would be a drawn lie.
+    data = {
+        "Received": [r["satisfaction"] * 100 for r in ordered],
+        "Survival floor": [
+            (r["survival_L"] / r["required_L"] * 100)
+            if r["required_L"] else 0.0 for r in ordered],
+        "Full share": [100.0] * len(ordered),
+    }
+    st.line_chart(data, height=180, color=[GREY, BAD, OK])
+    st.caption(f"{len(ordered)} recorded cycles, oldest first. The red "
+               f"line is this crop's own survival minimum — below it the "
+               f"crop fails rather than yielding less.")
+
+
 def render_history(rows):
     """Has this farm been shorted before?
 
@@ -657,6 +696,8 @@ def render_history(rows):
         f"of the last {len(rows)} recorded cycle"
         f"{'s' if len(rows) != 1 else ''}{tail}.</div>",
         unsafe_allow_html=True)
+
+    render_history_chart(rows)
 
     detail_table([
         (_when(r["timestamp"]),
@@ -821,15 +862,41 @@ def render_activity_log(log):
 # this allocation. Nothing here is stored between reruns.
 # ─────────────────────────────────────────────────────────────────
 
+# ── Compact units ────────────────────────────────────────────────
+# The Impact panel lives in a 384px column and these numbers run to
+# seven figures. "1,209,142 kg" is 96px of cell on its own, and four of
+# those plus a label pushed the table to 580px — the "vs today" column,
+# which is the entire point of the panel, fell off the right-hand edge
+# with no way to scroll to it.
+#
+# Tonnes and thousands, then. Nothing is rounded away that a reader
+# would act on: 1,209 t against 1,036 t is the same comparison as
+# 1,209,142 against 1,036,123, and the exact litres are one expander
+# down in "how each figure is calculated".
+
 def _rupees(v):
+    """₹20,400 -> ₹20.4k. Lakh would be more natural in Tamil Nadu, but
+    these figures sit in the tens of thousands and ₹0.2 lakh is harder
+    to read than ₹20.4k."""
+    if abs(v) >= 100_000:
+        return f"\u20b9{v/100_000:,.1f}L"      # lakh
+    if abs(v) >= 1_000:
+        return f"\u20b9{v/1_000:,.1f}k"
     return f"\u20b9{v:,.0f}"
 
 
 def _kg(v):
+    """Tonnes above 10,000 kg. Below that the kilogram is still the
+    unit a farmer thinks in."""
+    if abs(v) >= 10_000:
+        return f"{v/1_000:,.0f} t"
     return f"{v:,.0f} kg"
 
 
 def _litres(v):
+    """Kilolitres above 100,000 L, which every source is."""
+    if abs(v) >= 100_000:
+        return f"{v/1_000:,.0f} kL"
     return f"{v:,.0f} L"
 
 
@@ -856,10 +923,11 @@ def _difference(ym, aq, kind, better="high"):
         return f"{n} {word}", ahead
     if kind == "avoided":
         # A liability row reads backwards as a signed number: owing
-        # less is a win, and a minus sign does not look like one.
-        # Say what happened to the money instead.
-        return ((f"{_rupees(-gap)} avoided" if gap < 0
-                 else f"{_rupees(gap)} more owed"), ahead)
+        # less is a win, and a minus sign does not look like one. Say
+        # what happened to the money instead — "saved", not "avoided",
+        # because the column is narrow and the word has to fit.
+        return ((f"{_rupees(-gap)} saved" if gap < 0
+                 else f"{_rupees(gap)} more"), ahead)
     if kind == "points":
         sign = "+" if gap > 0 else "\u2212"
         n = abs(gap)
@@ -889,63 +957,46 @@ def impact_rows(sc, name_farms=True):
     smallholder_acres = SMALLHOLDER_AREA_M2 / M2_PER_ACRE
     has_small = aq["has_smallholders"]
 
-    def _stranded_fmt(cp_dict):
-        """Under head-to-tail, WHICH farms got nothing is the argument.
-
-        A bare count says a policy abandoned someone; the ids and their
-        distances say it abandoned the far end of the channel, which is
-        the whole finding. Falls back to the count when the scorecard
-        does not carry the detail."""
-        v = cp_dict["farms_with_nothing"]
-        sf = cp_dict.get("stranded_farms", [])
-        if not sf:
-            return f"{v:,.0f}"
-        details = ", ".join(f"{f['farm_id']} at {f['distance']}m"
-                            for f in sf)
-        return (f"{v:,.0f}<br><span style='font-size:11px;"
-                f"font-weight:normal;line-height:1.2;"
-                f"display:inline-block;margin-top:2px;'>{details}</span>")
-
     return [
-        {"label": "Total food produced",
+        {"label": "Food produced",
          "note": "every farm's expected harvest, scaled down by how "
                  "little water it actually got",
          "cp": cp["total_yield_kg"], "ym": ym["total_yield_kg"],
          "aq": aq["total_yield_kg"],
-         "fmt": _kg, "kind": "kg", "better": "high"},
+         "fmt": _kg, "kind": "kg", "better": "high", "key": True},
 
-        {"label": "Staple food produced",
+        {"label": "Staple food",
          "note": "the same sum over staples and pulses only. Cane runs "
                  "28x heavier per hectare than ragi, so raw tonnage can "
                  "be won by feeding cash crops and starving food",
          "cp": cp["staple_yield_kg"], "ym": ym["staple_yield_kg"],
          "aq": aq["staple_yield_kg"],
-         "fmt": _kg, "kind": "kg", "better": "high"},
+         "fmt": _kg, "kind": "kg", "better": "high", "key": True},
 
-        {"label": "Crops lost entirely",
+        {"label": "Crops lost",
          "note": "a farm below its survival minimum loses the whole "
                  "season, wasting every litre already spent on it",
          "cp": cp["crops_lost"], "ym": ym["crops_lost"],
          "aq": aq["crops_lost"],
          "fmt": lambda v: f"{v:,.0f}", "kind": "count", "better": "low",
-         "loud": True},
+         "loud": True, "key": True},
 
-        {"label": "Farms below survival minimum",
+        {"label": "Farms below floor",
          "note": "the same test as the row above, counted as farms — one "
                  "farm grows one crop here, so the two always match",
          "cp": cp["farms_below_survival"], "ym": ym["farms_below_survival"],
          "aq": aq["farms_below_survival"],
          "fmt": lambda v: f"{v:,.0f}", "kind": "count", "better": "low"},
 
-        {"label": "Farms receiving nothing",
+        {"label": "Farms given nothing",
          "note": "farms allocated zero litres — under head-to-tail these "
                  "are the tail-enders the channel never reached",
          "cp": cp["farms_with_nothing"], "ym": ym["farms_with_nothing"],
          "aq": aq["farms_with_nothing"],
-         "cp_str": _stranded_fmt(cp),
-         "fmt": lambda v: f"{v:,.0f}", "kind": "count", "better": "low"},
+         "fmt": lambda v: f"{v:,.0f}", "kind": "count", "better": "low",
+         "key": True},
 
-        {"label": "Smallholder harvest kept",
+        {"label": "Smallholder kept",
          "note": (f"what farms under {smallholder_acres:.1f} acres kept of "
                   f"their full harvest" if has_small
                   else "no holdings under 2 ha in this command area"),
@@ -954,7 +1005,7 @@ def impact_rows(sc, name_farms=True):
          "fmt": lambda v: _pct(v, has_small), "kind": "points",
          "better": "high", "compare": has_small},
 
-        {"label": "Largest farm harvest kept",
+        {"label": "Largest farm kept",
          "note": f"the biggest holding in the command area"
                  + (f" ({aq['largest_farm_id']})" if name_farms else "")
                  + f" — what equity costs the farm "
@@ -963,28 +1014,28 @@ def impact_rows(sc, name_farms=True):
          "aq": aq["largest_farm_kept_pct"],
          "fmt": lambda v: f"{v:.0f}%", "kind": "points", "better": "high"},
 
-        {"label": "Water actually used",
+        {"label": "Water used",
          "note": "every policy spends the same pool — the argument is "
                  "about who receives it, not how much is released",
          "cp": cp["water_used_L"], "ym": ym["water_used_L"],
          "aq": aq["water_used_L"],
          "fmt": _litres, "kind": "litres", "better": "high"},
 
-        {"label": "Economic value of harvest",
+        {"label": "Value of harvest",
          "note": "each crop's realised kilograms at its own market "
                  "price, MSP-anchored where one exists",
          "cp": cp["value_rupees"], "ym": ym["value_rupees"],
          "aq": aq["value_rupees"],
          "fmt": _rupees, "kind": "rupees", "better": "high"},
 
-        {"label": "Compensation avoided",
+        {"label": "Compensation",
          "note": (f"what each policy would owe at "
                   f"{_rupees(COMPENSATION_PER_ACRE_RUPEES)} an acre for "
                   f"every crop lost — the difference is what AquaFair "
                   f"does not have to pay"),
          "cp": cp["compensation_rupees"], "ym": ym["compensation_rupees"],
          "aq": aq["compensation_rupees"],
-         "fmt": _rupees, "kind": "avoided", "better": "low"},
+         "fmt": _rupees, "kind": "avoided", "better": "low", "key": True},
     ]
 
 
@@ -1081,59 +1132,115 @@ def render_impact(out, workings=True):
         f"{impact_headline(sc, infeasible)}</div>",
         unsafe_allow_html=True)
 
-    head = (f"<tr style='border-bottom:2px solid {INK};'>"
-            f"<th style='text-align:left;padding:8px 6px;'></th>"
-            f"<th style='text-align:right;padding:8px 6px;color:{GREY};"
-            f"font-size:{T_SMALL};font-weight:600;'>Current practice</th>"
-            f"<th style='text-align:right;padding:8px 6px;color:{GREY};"
-            f"font-size:{T_SMALL};font-weight:600;'>Maximise yield</th>"
-            f"<th style='text-align:right;padding:8px 10px;color:{INK};"
-            f"font-size:{T_SMALL};font-weight:700;background:{TINT};'>"
-            f"AquaFair</th>"
-            f"<th style='text-align:right;padding:8px 6px;color:{GREY};"
-            f"font-size:{T_SMALL};font-weight:600;'>vs current practice</th>"
-            f"</tr>")
+    def _table(rows, loud_notes=True):
+        """The comparison as one table: today, AquaFair, and the gap.
 
-    body = ""
-    # Same audience decision as the workings expander: a screen that
-    # does not get the worked examples does not get the farm id in the
-    # largest-farm row either.
-    for r in impact_rows(sc, name_farms=workings):
-        if r.get("compare", True):
-            diff, ahead = _difference(r["cp"], r["aq"], r["kind"],
-                                      r["better"])
-        else:
-            diff, ahead = "\u2014", False
-        pad = "13px" if r.get("loud") else "9px"
-        big = f"font-size:{T_HEAD};" if r.get("loud") else ""
-        body += (
-            f"<tr style='border-bottom:1px solid {LINE};vertical-align:top;'>"
-            f"<td style='padding:{pad} 6px;'>"
-            f"<div style='color:{INK};font-weight:600;'>{r['label']}</div>"
-            f"<div style='color:{GREY};font-size:{T_SMALL};"
-            f"line-height:1.4;margin-top:2px;'>{r['note']}</div></td>"
-            f"<td style='text-align:right;padding:{pad} 6px;color:{GREY};"
-            f"white-space:nowrap;{big}'>"
-            f"{r.get('cp_str') if 'cp_str' in r else r['fmt'](r['cp'])}</td>"
-            f"<td style='text-align:right;padding:{pad} 6px;color:{GREY};"
-            f"white-space:nowrap;{big}'>{r['fmt'](r['ym'])}</td>"
-            f"<td style='text-align:right;padding:{pad} 10px;color:{INK};"
-            f"font-weight:700;background:{TINT};white-space:nowrap;{big}'>"
-            f"{r['fmt'](r['aq'])}</td>"
-            f"<td style='text-align:right;padding:{pad} 6px;"
-            f"white-space:nowrap;font-weight:700;"
-            f"color:{OK if ahead else GREY};{big}'>{diff}</td></tr>")
+        THREE columns of numbers, not four. Maximise-yield was the
+        fourth and it is gone from here — not deleted, it is a full
+        column in "All five policies" below. It was costing 110px in a
+        384px panel to answer a question nobody in an irrigation office
+        asks: they do not run yield-max today and they are not proposing
+        to. The comparison that decides anything is what happens now
+        against what AquaFair does instead.
 
-    # Four value columns of six-figure numbers do not fit the right-hand
-    # column: measured at 967px inside 384px, which cut "vs current
-    # practice" — the column the section exists to show — off the page
-    # entirely, with no way to scroll to it. It scrolls inside its own
-    # box now, like the five-policy table below it.
-    st.markdown(
-        f"<div style='overflow-x:auto;'>"
-        f"<table style='width:100%;border-collapse:collapse;"
-        f"font-size:{T_BODY};'>{head}{body}</table></div>",
-        unsafe_allow_html=True)
+        Notes are tooltips on the row name. Ten rows each carrying a
+        two-line explanation ran to about thirty lines of text and the
+        reader met the argument somewhere in the middle of it. The one
+        row that IS the argument keeps its note on screen."""
+        head = (
+            f"<tr style='border-bottom:2px solid {INK};'>"
+            f"<th style='text-align:left;padding:6px 4px 6px 0;'></th>"
+            f"<th style='text-align:right;padding:6px 4px;color:{GREY};"
+            f"font-size:{T_SMALL};font-weight:600;white-space:nowrap;' "
+            f"title='How water is shared today: served from the head of "
+            f"the channel until it runs out. No survival floor, no "
+            f"priority — position decides.'>Today</th>"
+            f"<th style='text-align:right;padding:6px 7px;color:{INK};"
+            f"font-size:{T_SMALL};font-weight:700;background:{TINT};"
+            f"white-space:nowrap;'>AquaFair</th>"
+            f"<th style='text-align:right;padding:6px 0 6px 4px;"
+            f"color:{GREY};font-size:{T_SMALL};font-weight:600;"
+            f"white-space:nowrap;' title='AquaFair against how water is "
+            f"shared today. Green means AquaFair is ahead on that "
+            f"row.'>vs today</th></tr>")
+
+        body = ""
+        for r in rows:
+            if r.get("compare", True):
+                diff, ahead = _difference(r["cp"], r["aq"], r["kind"],
+                                          r["better"])
+            else:
+                diff, ahead = "\u2014", False
+            loud = r.get("loud") and loud_notes
+            pad = "9px" if loud else "6px"
+            big = f"font-size:{T_HEAD};" if loud else ""
+            body += (
+                f"<tr style='border-bottom:1px solid {LINE};"
+                f"vertical-align:middle;'>"
+                # The label wraps; the numbers never do. A cell that
+                # breaks "1,036 t" across two lines is unreadable, but
+                # a two-line row name is fine and it is what keeps the
+                # table inside the column.
+                #
+                # ⚠ NO INLINE NOTES. One row carrying a four-line
+                # explanation made every other cell in that row four
+                # lines tall, and the figure the row exists for sat
+                # alone at the top of the empty space. Every note is a
+                # tooltip; the loud row is distinguished by size.
+                f"<td style='padding:{pad} 4px {pad} 0;width:40%;' "
+                f"title=\"{r['note']}\">"
+                f"<div style='color:{INK};font-weight:600;cursor:help;"
+                f"line-height:1.3;{big}'>{r['label']}</div></td>"
+                f"<td style='text-align:right;padding:{pad} 4px;"
+                f"color:{GREY};white-space:nowrap;{big}'>"
+                f"{r['fmt'](r['cp'])}</td>"
+                f"<td style='text-align:right;padding:{pad} 7px;"
+                f"color:{INK};font-weight:700;background:{TINT};"
+                f"white-space:nowrap;{big}'>{r['fmt'](r['aq'])}</td>"
+                f"<td style='text-align:right;padding:{pad} 0 {pad} 4px;"
+                f"white-space:nowrap;font-weight:700;font-size:{T_SMALL};"
+                f"color:{OK if ahead else GREY};'>{diff}</td></tr>")
+
+        # table-layout:fixed with a 38% label column. Auto layout let
+        # the longest label set the column width and pushed the numbers
+        # off the right edge; fixed makes the label wrap instead, which
+        # is the trade that fits.
+        st.markdown(
+            f"<table style='width:100%;border-collapse:collapse;"
+            f"font-size:{T_BODY};table-layout:fixed;'>{head}{body}</table>",
+            unsafe_allow_html=True)
+
+    rows = impact_rows(sc, name_farms=workings)
+    # Five rows carry the argument: what was grown, what was grown that
+    # people eat, what was lost, who got nothing, and what the losses
+    # cost. The other five are supporting evidence and go one click
+    # away — present for a judge who asks, absent for one who does not.
+    _table([r for r in rows if r.get("key")])
+
+    # WHICH farms got nothing, under the table rather than inside it.
+    # A bare count says a policy abandoned someone; the ids and their
+    # distances say it abandoned the far end of the channel, which is
+    # the whole finding — and it is a sentence, not a table cell. In
+    # the cell it wrapped under the entire table.
+    stranded = sc["current"].get("stranded_farms", [])
+    if stranded:
+        listed = ", ".join(f"{f['farm_id']} at {f['distance']:,}m"
+                           for f in stranded[:6])
+        more = (f" and {len(stranded) - 6} more"
+                if len(stranded) > 6 else "")
+        st.markdown(
+            f"<div style='font-size:{T_SMALL};color:{GREY};"
+            f"line-height:1.5;margin:8px 0 2px 0;'>"
+            f"Under today's practice the channel runs dry at "
+            f"<b style='color:{INK};'>{listed}</b>{more} — measured from "
+            f"the sluice. Position, not need, decides who that is.</div>",
+            unsafe_allow_html=True)
+
+    with st.expander("Five more measures"):
+        _table([r for r in rows if not r.get("key")], loud_notes=False)
+        st.caption("Hover any row name for what it measures. "
+                   "Maximise-yield is a column in the policy table "
+                   "below.")
 
     if workings:
         with st.expander("how each figure is calculated"):

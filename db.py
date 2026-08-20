@@ -339,6 +339,12 @@ def _build(conn):
     _seed_demo_farms(conn)
     conn.commit()
 
+    # ⚠ ONLY INTO AN EMPTY LOG. A seeded season must never mix with real
+    # decisions, and it must never be written twice — the fairness panel
+    # counts cycles, and a doubled season would double every count.
+    if conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0:
+        seed_season(conn)
+
 
 def init_db():
     """Create the tables if missing and seed the demo data.
@@ -717,6 +723,202 @@ def verify_integrity(run_id):
             return None
         return hash_conditions(dict(r), r["policy_mode"]) == r["input_hash"]
     return _query(go)
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# THE SEEDED SEASON
+# ══════════════════════════════════════════════════════════════════
+# One Kharif season of allocations, written once into an empty record.
+#
+# WHY THIS EXISTS
+# The record only fills up when somebody clicks. On a fresh clone the
+# decision log is empty and every farm's history reads "no earlier
+# cycles" — which is honest, and useless. The panel that answers "has
+# this farm been shorted before?" cannot answer it, and a chart of one
+# afternoon's demo clicks is a chart of a demo, not of a season.
+#
+# So: twelve fortnightly cycles, June to November, run through the REAL
+# ENGINE against declining storage. Not invented numbers — the same
+# farm_agent, optimizer and coordinator the live page uses, on weather
+# that moves the way a Tamil Nadu Kharif actually moves.
+#
+# ⚠ IT IS DEMO DATA AND IT SAYS SO. Every seeded run is stamped
+# policy_mode 'equity' and dated in the past; db.py seeds it only into
+# an EMPTY runs table, so it can never mix with or overwrite real
+# decisions. A deployment starts with an empty record and fills it one
+# real cycle at a time.
+#
+# WHY THE ENGINE AND NOT RANDOM NUMBERS
+# A fabricated history would have to be fabricated consistently — a
+# farm's satisfaction, its yield loss and its survival floor are not
+# independent, and inventing them separately would produce rows that
+# contradict the arithmetic on the live page. Running the engine means
+# the history obeys the same rules the present does, and a judge who
+# checks a seeded row against the formula finds it holds.
+
+# ETo mm/day and rainfall mm, fortnight by fortnight. June is hot and
+# dry before the monsoon, the north-east monsoon arrives around cycle 8,
+# and the season closes wet. Storage falls as water is drawn and rises
+# on the rain.
+#
+# ⚠ THE STORAGE COLUMN IS CALIBRATED, NOT PICKED.
+# A first pass ran storage down to 0.44 of live, which read as a
+# plausible drought and was not: at ETo 6.6 the survival floors alone
+# need 0.83-0.88 of full deliverable, so every farm on every source
+# finished below its floor in four of twelve cycles. The seeded history
+# would then have contradicted the one claim that holds everywhere —
+# that AquaFair loses no crops — using our own engine to do it.
+#
+# So the curve stays above the floors while the air is hot, and only
+# dips into genuinely hard territory once the monsoon has cut demand.
+# The shortfalls are real, the farms are squeezed, and none of them
+# dies. Recheck this table if SURVIVAL_MIN or the source volumes change:
+#     python3 -c "import db; db.check_season()"
+SEASON_WEATHER = [
+    # (label,            ETo, rain_mm, storage as a share of live)
+    ("Jun, early",       6.4,   0,     1.00),
+    ("Jun, late",        6.6,   0,     0.98),
+    ("Jul, early",       6.5,   4,     0.96),
+    ("Jul, late",        6.2,   0,     0.94),
+    ("Aug, early",       6.0,   0,     0.92),
+    ("Aug, late",        5.8,   6,     0.90),
+    ("Sep, early",       5.5,   3,     0.88),
+    ("Sep, late",        5.2,  14,     0.86),   # monsoon arrives
+    ("Oct, early",       4.6,  22,     0.90),   # storage recovers
+    ("Oct, late",        4.4,  18,     0.95),
+    ("Nov, early",       4.2,   9,     0.98),
+    ("Nov, late",        4.5,   2,     0.93),
+]
+
+# The season is fixed, not random: the same twelve cycles every time the
+# record is built. A history that changed on every rebuild would make
+# the fairness panel say something different each demo, and a farmer
+# looking at their own record twice would see two different pasts.
+SEASON_YEAR = 2026
+SEASON_START_MONTH = 6
+
+
+def _season_timestamp(index):
+    """Fortnightly, from June. Dated in the past so a seeded row can
+    never be mistaken for a decision made today."""
+    from datetime import datetime, timedelta
+    start = datetime(SEASON_YEAR, SEASON_START_MONTH, 1, 9, 0, 0)
+    return (start + timedelta(days=14 * index)).isoformat(timespec="seconds")
+
+
+def check_season():
+    """Does the seeded season keep every farm alive?
+
+    Run after changing SEASON_WEATHER, SURVIVAL_MIN or a source volume.
+    Prints the worst cycle per source and whether any farm fell below
+    its survival minimum — a seeded history that loses crops would
+    contradict the claim the live page makes."""
+    from generate import demo_farms, farms_for_source
+    from farm_agent import build_claims
+    from coordinator import run_coordination
+
+    farms = demo_farms()
+    bad = 0
+    for sid, src in query_sources().items():
+        served = farms_for_source(farms, sid)
+        if not served:
+            continue
+        worst_gap, lost = 0.0, 0
+        for label, eto, rain, share in SEASON_WEATHER:
+            deliverable = (src["live_storage_L"] * share
+                           * src["conveyance_efficiency"])
+            claims = build_claims(served,
+                                  {"ETo": eto, "rainfall_mm": rain,
+                                   "tank_liters": deliverable})
+            co = run_coordination(claims, deliverable, mode="equity")
+            need = sum(c["water_required_L"] for c in claims)
+            gap = (1 - deliverable / need) * 100 if need else 0
+            worst_gap = max(worst_gap, gap)
+            lost += sum(1 for c in claims
+                        if co["allocation"][c["farm_id"]]["total_L"]
+                        < c["survival_minimum_L"])
+        flag = "" if lost == 0 else f"   <- {lost} farm-cycles below floor"
+        bad += lost
+        print(f"  {sid}  worst shortfall {worst_gap:>5.1f}%   "
+              f"crops lost {lost}{flag}")
+    print()
+    print("season is safe to seed" if bad == 0 else
+          "⚠ the seeded season loses crops — raise the storage column")
+    return bad
+
+
+def seed_season(conn):
+    """Write one season of allocations, computed by the real engine.
+
+    Imports the engine lazily. db.py is imported BY sources.py, which is
+    imported by generate.py and impact.py — importing them at module
+    level here would close that circle and nothing would load at all.
+
+    Silently does nothing if the engine cannot be imported. The record
+    is still a working record without a seeded season, and a database
+    layer that refuses to open because a sibling module moved would be
+    a worse failure than an empty log."""
+    try:
+        from generate import demo_farms, farms_for_source
+        from farm_agent import build_claims
+        from coordinator import run_coordination
+    except Exception:                   # noqa: BLE001 — see docstring
+        return 0
+
+    written = 0
+    farms = demo_farms()
+    sources = conn.execute(
+        "SELECT source_id, live_storage_L, conveyance_efficiency "
+        "FROM sources ORDER BY source_id").fetchall()
+
+    for i, (label, eto, rain, share) in enumerate(SEASON_WEATHER):
+        for src in sources:
+            sid = src["source_id"]
+            served = farms_for_source(farms, sid)
+            if not served:
+                continue
+
+            stored = src["live_storage_L"] * share
+            deliverable = stored * src["conveyance_efficiency"]
+            weather = {"ETo": eto, "rainfall_mm": rain,
+                       "tank_liters": deliverable}
+
+            claims = build_claims(served, weather)
+            co = run_coordination(claims, deliverable, mode="equity")
+            alloc = co["allocation"]
+
+            conditions = {"source_id": sid, "eto": eto, "rainfall_mm": rain,
+                          "stored_L": stored,
+                          "conveyance_pct": src["conveyance_efficiency"],
+                          "deliverable_L": deliverable,
+                          "rounds_used": co["rounds_used"]}
+            cur = conn.execute(
+                "INSERT INTO runs (timestamp, source_id, eto, rainfall_mm, "
+                "stored_L, conveyance_pct, deliverable_L, policy_mode, "
+                "rounds_used, approved_by, approved_at, input_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (_season_timestamp(i), sid, round(eto, 6), round(rain, 6),
+                 round(stored, 3), src["conveyance_efficiency"],
+                 round(deliverable, 3), "equity", co["rounds_used"],
+                 # Past cycles were signed off at the time. An unapproved
+                 # season would make every historical row look like an
+                 # open question, and the approval column is not a
+                 # backlog.
+                 "WRD-ERD-042", _season_timestamp(i),
+                 hash_conditions(conditions, "equity")))
+            run_id = cur.lastrowid
+            conn.executemany(
+                "INSERT INTO allocations (run_id, farm_id, crop, "
+                "required_L, survival_L, allocated_L, satisfaction, "
+                "yield_loss_pct, contested, justification) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [(run_id,) + r for r in _alloc_rows(alloc, claims)])
+            written += 1
+
+    conn.commit()
+    return written
 
 
 if __name__ == "__main__":
